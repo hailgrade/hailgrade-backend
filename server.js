@@ -106,8 +106,17 @@ app.post('/auth/login', async (req, res) => {
   }
 });
 
+// Founder emails — auto-promoted to admin on any authenticated request.
+// Add additional admin emails here if you bring on a co-founder or support staff.
+const ADMIN_EMAILS = new Set(['adjustingsmith@gmail.com', 'claims@smithadjusters.com']);
+
 app.get('/me', requireAuth, async (req, res) => {
   const u = req.user;
+  // Auto-promote founder emails to admin so they don't need a SQL session to bootstrap
+  if (ADMIN_EMAILS.has((u.email || '').toLowerCase()) && u.role !== 'admin') {
+    await q("UPDATE users SET role = 'admin' WHERE id = $1", [u.id]);
+    u.role = 'admin';
+  }
   res.json({
     user: {
       id: u.id, email: u.email, full_name: u.full_name, license_number: u.license_number,
@@ -116,6 +125,142 @@ app.get('/me', requireAuth, async (req, res) => {
       monthly_analyses_used: u.monthly_analyses_used
     }
   });
+});
+
+// ============ Admin middleware ============
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'admin_only' });
+  }
+  next();
+}
+
+// ============ Admin endpoints ============
+// Aggregate stats for the admin dashboard.
+app.get('/admin/stats', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const [users] = await q(`SELECT
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE plan_status IN ('active','trialing'))::int AS paying,
+      COUNT(*) FILTER (WHERE plan_status = 'past_due')::int AS past_due,
+      COUNT(*) FILTER (WHERE plan_status = 'canceled')::int AS canceled,
+      COUNT(*) FILTER (WHERE created_at > now() - interval '7 days')::int AS new_this_week
+      FROM users`);
+    const [analyses] = await q(`SELECT
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE created_at > now() - interval '30 days')::int AS month,
+      COUNT(*) FILTER (WHERE created_at > now() - interval '7 days')::int AS week,
+      COUNT(*) FILTER (WHERE created_at > now() - interval '24 hours')::int AS day,
+      COUNT(*) FILTER (WHERE status = 'error')::int AS errors,
+      COUNT(*) FILTER (WHERE is_roof = false)::int AS not_roof,
+      COALESCE(SUM(cost_cents), 0)::int AS total_cost_cents,
+      COALESCE(SUM(cost_cents) FILTER (WHERE created_at > now() - interval '30 days'), 0)::int AS month_cost_cents
+      FROM analyses`);
+    const findings = await q(`SELECT category, COUNT(*)::int AS n
+      FROM findings WHERE created_at > now() - interval '30 days'
+      GROUP BY category ORDER BY n DESC`);
+    // Rough MRR: $49 * solo + $149 * firm (active or trialing only)
+    const planCounts = await q(`SELECT plan, COUNT(*)::int AS n FROM users
+      WHERE plan_status IN ('active','trialing') AND plan IS NOT NULL
+      GROUP BY plan`);
+    let mrrCents = 0;
+    for (const r of planCounts) {
+      if (r.plan === 'solo') mrrCents += r.n * 4900;
+      else if (r.plan === 'firm') mrrCents += r.n * 14900;
+    }
+    res.json({ users, analyses, findings, plans: planCounts, mrr_cents: mrrCents });
+  } catch (err) {
+    console.error('[admin/stats]', err);
+    res.status(500).json({ error: 'stats_failed', detail: err.message });
+  }
+});
+
+// List users with pagination + search
+app.get('/admin/users', requireAuth, requireAdmin, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  const offset = parseInt(req.query.offset) || 0;
+  const search = (req.query.search || '').trim().toLowerCase();
+  try {
+    let rows;
+    if (search) {
+      rows = await q(
+        `SELECT id, email, full_name, license_number, firm_name, role, plan, plan_status,
+                plan_renews_at, monthly_analyses_used, created_at, stripe_customer_id
+         FROM users
+         WHERE lower(email) LIKE $1 OR lower(coalesce(full_name,'')) LIKE $1 OR lower(coalesce(firm_name,'')) LIKE $1
+         ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+        ['%' + search + '%', limit, offset]
+      );
+    } else {
+      rows = await q(
+        `SELECT id, email, full_name, license_number, firm_name, role, plan, plan_status,
+                plan_renews_at, monthly_analyses_used, created_at, stripe_customer_id
+         FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      );
+    }
+    // Attach analysis count per user (cheap on small data; revisit when scale grows)
+    const [totalRow] = await q(`SELECT COUNT(*)::int AS n FROM users`);
+    res.json({ users: rows, total: totalRow.n, limit, offset });
+  } catch (err) {
+    console.error('[admin/users]', err);
+    res.status(500).json({ error: 'list_failed', detail: err.message });
+  }
+});
+
+// Update a user (role, plan_status, license, firm, name)
+app.patch('/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'bad_id' });
+  const allowed = ['role', 'plan_status', 'plan', 'license_number', 'firm_name', 'full_name'];
+  const fields = Object.keys(req.body || {}).filter(k => allowed.includes(k));
+  if (fields.length === 0) return res.status(400).json({ error: 'no_updatable_fields' });
+  const sets = fields.map((k, i) => `${k} = $${i + 2}`).join(', ');
+  const values = fields.map(k => req.body[k]);
+  try {
+    const updated = await one(
+      `UPDATE users SET ${sets} WHERE id = $1 RETURNING id, email, full_name, role, plan, plan_status`,
+      [id, ...values]
+    );
+    if (!updated) return res.status(404).json({ error: 'not_found' });
+    res.json({ user: updated });
+  } catch (err) {
+    console.error('[admin/users PATCH]', err);
+    res.status(500).json({ error: 'update_failed', detail: err.message });
+  }
+});
+
+// Delete a user (cascades to analyses and findings via FK)
+app.delete('/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'bad_id' });
+  if (id === req.user.id) return res.status(400).json({ error: 'cannot_delete_self' });
+  try {
+    await q('DELETE FROM users WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin/users DELETE]', err);
+    res.status(500).json({ error: 'delete_failed', detail: err.message });
+  }
+});
+
+// Recent analyses across all users
+app.get('/admin/analyses', requireAuth, requireAdmin, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 30, 100);
+  try {
+    const rows = await q(
+      `SELECT a.id, a.slope, a.is_roof, a.overall_severity, a.roof_material,
+              a.damage_categories, a.findings_count, a.cost_cents, a.status, a.created_at,
+              u.email AS user_email
+       FROM analyses a JOIN users u ON u.id = a.user_id
+       ORDER BY a.created_at DESC LIMIT $1`,
+      [limit]
+    );
+    res.json({ analyses: rows });
+  } catch (err) {
+    console.error('[admin/analyses]', err);
+    res.status(500).json({ error: 'list_failed', detail: err.message });
+  }
 });
 
 app.patch('/me', requireAuth, async (req, res) => {
