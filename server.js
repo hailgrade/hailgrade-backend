@@ -16,6 +16,14 @@ import Stripe from 'stripe';
 import { pool, q, one, ensureSchema } from './db.js';
 import { hashPassword, checkPassword, signToken, requireAuth, requireActiveSubscription } from './auth.js';
 
+// Trim whitespace from every env var on boot — Render's UI can leave hidden newlines
+// in pasted secrets, which breaks Stripe webhook signature verification etc.
+for (const k of Object.keys(process.env)) {
+  if (typeof process.env[k] === 'string') {
+    process.env[k] = process.env[k].trim();
+  }
+}
+
 const app = express();
 const port = process.env.PORT || 3000;
 
