@@ -128,12 +128,33 @@ app.get('/me', requireAuth, async (req, res) => {
 });
 
 // ============ Admin middleware ============
+// Admin endpoints require BOTH an admin-role user (auth token) AND a separate admin password
+// passed in X-Admin-Password header. The password is set as ADMIN_PASSWORD env var on Render.
+// This is intentional belt-and-suspenders: even if someone steals an admin's auth token,
+// they still can't view or mutate other accounts without the password.
 function requireAdmin(req, res, next) {
   if (!req.user || req.user.role !== 'admin') {
     return res.status(403).json({ error: 'admin_only' });
   }
+  const provided = req.headers['x-admin-password'];
+  const expected = process.env.ADMIN_PASSWORD;
+  if (!expected) {
+    // No password configured on the server — soft-fail open with a warning header so
+    // admin can still set things up the first time (the env var is the lock, missing == no lock).
+    res.setHeader('X-Admin-Warning', 'ADMIN_PASSWORD not set on server — anyone with admin role can use this');
+    return next();
+  }
+  if (provided !== expected) {
+    return res.status(401).json({ error: 'admin_password_required' });
+  }
   next();
 }
+
+// Lightweight endpoint to verify the admin password before loading the dashboard.
+// Returns 200 if (a) user is admin and (b) password matches, else 401/403.
+app.get('/admin/verify', requireAuth, requireAdmin, (req, res) => {
+  res.json({ ok: true, configured: !!process.env.ADMIN_PASSWORD });
+});
 
 // ============ Admin endpoints ============
 // Aggregate stats for the admin dashboard.
