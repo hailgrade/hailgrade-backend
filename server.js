@@ -646,6 +646,10 @@ Before you flag anything, read this list. A healthy asphalt-shingle roof has fea
 
 3. **Natural shadows at hips, ridges, and valleys.** Where two slopes meet, shingles butt against ridge caps or hip caps. The transition creates shadow lines and apparent edge irregularity. This is not "lifted tabs" or "displaced shingles." Verify true lift by looking for the underside of a shingle being visible, daylight under the tab, or exposed nail heads — not just a shadow at the ridge transition.
 
+3a. **Hip and ridge cap shingles.** Cap shingles are folded individual pieces installed along ridge and hip lines as a separate course on top of the field shingles. By design they sit PROUD of the field — their bottom edge is elevated above the adjacent field course. They do not lie flat. A cap shingle visible in the upper portion of a slope photo (near where two roof planes meet) is almost certainly the hip cap, NOT a lifted field tab. Do not call hip/ridge cap shingles "lifted", "creased", "displaced", or "broken seal". Only flag a cap if a tab is visibly missing, torn, or rotated out of its expected position.
+
+3b. **Edge-of-frame shingle artifacts.** A shingle at the extreme edge of the camera frame may appear to lift or angle due to camera perspective and lens distortion. If the only "anomaly" you can find is at the very edge of the image and is not corroborated by other indicators in the centered field of view, do not flag it.
+
 4. **Normal granule color variation across the slope.** Shingles oxidize unevenly over years. Some patches will look lighter or darker. Without LOCAL impact indicators (round mat exposure, fresh fracture, halo with intact surround), this is age, not hail.
 
 5. **Roof junk that isn't damage.** Leaves, twigs, pollen stains, algae streaks, lichen patches, satellite dishes, vents, pipe boots, footwear marks, sealant smears — none of these are storm damage on their own.
@@ -653,6 +657,8 @@ Before you flag anything, read this list. A healthy asphalt-shingle roof has fea
 6. **Camera artifacts.** JPEG compression, motion blur, lens distortion, low contrast in shadowed areas, glare patches — do not interpret as damage.
 
 If you cannot point to a SPECIFIC visual indicator on a SPECIFIC tab or zone that matches the strict definitions below, return no finding for that area. It is correct and expected for a healthy roof photo to return findings: [] and claim_strength: "no-claim".
+
+DO NOT add a "wear_tear" finding just to describe normal age signs on a roof. The wear_tear category exists ONLY to document a pre-existing condition that a carrier will try to use against an otherwise legitimate storm finding. If there is no storm finding being made, do not add a wear_tear finding either — just return findings: []. Normal weathered roofs do not need to be documented as damaged.
 
 ============================================================
 CONFIDENCE & LANGUAGE DISCIPLINE
