@@ -714,6 +714,49 @@ Other strong wind indicators (ANY one is sufficient for "wind" classification):
 When you see chalk marks on a slope and the area looks "fine" — look again specifically for a dark horizontal line across the top of those tabs. That is almost certainly what was marked.
 
 ============================================================
+SEVERITY CALIBRATION — THIS IS HOW YOU ASSIGN SEVERE / MODERATE / MINOR
+============================================================
+
+Severity is the most-misused field in your output. Calibrate it correctly:
+
+**SEVERE** — Use for any of:
+- Missing shingle or missing tab (any cause — wind is the default attribution unless clearly torn off by a tree branch etc.)
+- Displaced shingle out of its course position
+- Visible torn mat or large exposed mat fracture
+- Two or more creased tabs visible on the same slope in the same photo
+- Lifted tab where the underside is visible (clear daylight under the tab)
+- A creased tab co-located with mat exposure or granule loss along the crease line
+- Any structural breach (puncture through the deck visible)
+
+**MODERATE** — Use for any of:
+- A single clearly visible crease on a single tab (dark fold line on the exposed tab face, not the bottom-edge course shadow)
+- A single clearly visible hail bruise with mat fracture and granule halo
+- Confirmed lifted tab corner without daylight underneath
+- A chalk-marked tab where you can also visually identify the damage indicator the inspector marked
+
+**MINOR** — Use for any of:
+- Granule displacement at one edge of one tab with no fracture
+- Surface scuff or directional streak
+- A chalk-marked area where you can see SOMETHING is off but cannot resolve the exact indicator
+
+**NONE / NO FINDING** — Use when no specific damage is visible.
+
+CRITICAL: A creased shingle is FAILED. The seal strip is broken, the tab is no longer wind-resistant, and water can intrude. Do NOT call a clearly visible crease "minor." A single confirmed crease is MODERATE. Two or more confirmed creases on the same slope is SEVERE.
+
+A missing shingle/tab is ALWAYS at least MODERATE and almost always SEVERE. It is also WIND damage (category: "wind"), not "OTHER", unless there is specific reason to attribute it elsewhere.
+
+============================================================
+BOUNDING BOX — DRAW IT ON THE DAMAGE
+============================================================
+
+The "bbox" field must cover the DAMAGED SHINGLE itself — the tab with the crease, the missing piece, the impact halo. The bbox is NOT placed on:
+- A chalk mark near the damage (move the bbox to the actual damaged tab)
+- A general area where you "think" damage might be (move the bbox to the specific indicator)
+- A wide region around the damage (tighten the bbox to the affected tab)
+
+If you cannot place a tight bbox on a specific damaged tab, you do not have a finding. Return findings: [] or fewer findings.
+
+============================================================
 HAIL DAMAGE — RIGOROUS IDENTIFICATION
 ============================================================
 
