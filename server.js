@@ -444,6 +444,124 @@ app.post('/billing/portal', requireAuth, async (req, res) => {
   }
 });
 
+// ============ Weather history ============
+// Pulls hail / high-wind events near a property from the past N days.
+// Sources:
+//   - Open-Meteo Historical (wind gusts) — free, no API key
+//   - Iowa State Mesonet (NWS Local Storm Reports for hail) — free, no API key
+// Geocoding: Nominatim (OSM) — free, requires User-Agent header
+app.post('/weather/history', requireAuth, async (req, res) => {
+  try {
+    let { address, lat, lng, days } = req.body || {};
+    days = Math.min(Math.max(parseInt(days, 10) || 365, 7), 730);
+
+    // 1. Geocode address if no lat/lng provided
+    let geocoded = null;
+    if ((!lat || !lng) && address) {
+      const u = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`;
+      const gr = await fetch(u, { headers: { 'User-Agent': 'HailGrade/1.0 (claims@smithadjusters.com)' } });
+      if (gr.ok) {
+        const arr = await gr.json();
+        if (arr.length) { lat = parseFloat(arr[0].lat); lng = parseFloat(arr[0].lon); geocoded = { display: arr[0].display_name }; }
+      }
+    }
+    if (!lat || !lng) return res.status(400).json({ error: 'no_location', detail: 'Address could not be geocoded and no GPS provided' });
+
+    const end = new Date();
+    const start = new Date(end.getTime() - days * 86400 * 1000);
+    const fmt = d => d.toISOString().slice(0, 10);
+
+    // 2. Wind gusts from Open-Meteo Historical
+    const windEvents = [];
+    try {
+      const wu = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&start_date=${fmt(start)}&end_date=${fmt(end)}&daily=wind_gusts_10m_max,wind_speed_10m_max&wind_speed_unit=mph&timezone=auto`;
+      const wr = await fetch(wu);
+      if (wr.ok) {
+        const wd = await wr.json();
+        const dates = wd.daily?.time || [];
+        const gusts = wd.daily?.wind_gusts_10m_max || [];
+        const winds = wd.daily?.wind_speed_10m_max || [];
+        for (let i = 0; i < dates.length; i++) {
+          const gust = gusts[i];
+          const wind = winds[i];
+          // 50 mph gust threshold for documentable wind event
+          if (gust != null && gust >= 50) {
+            windEvents.push({
+              date: dates[i],
+              type: 'wind',
+              magnitude: Math.round(gust),
+              unit: 'mph gust',
+              sustained: wind != null ? Math.round(wind) : null,
+              distance_mi: 0,
+              source: 'Open-Meteo Historical / ERA5'
+            });
+          }
+        }
+      }
+    } catch (e) { console.error('[weather] open-meteo failed', e.message); }
+
+    // 3. Hail reports from Iowa State Mesonet — NWS Local Storm Reports within ~10mi radius
+    const hailEvents = [];
+    try {
+      // ~10mi bounding box
+      const dlat = 10 / 69;            // ~10mi latitude
+      const dlng = 10 / (69 * Math.cos(lat * Math.PI / 180));
+      const bbox = `${lng - dlng},${lat - dlat},${lng + dlng},${lat + dlat}`;
+      const sts = fmt(start) + 'T00:00';
+      const ets = fmt(end) + 'T23:59';
+      const hu = `https://mesonet.agron.iastate.edu/geojson/lsr.geojson?sts=${sts}&ets=${ets}&bbox=${bbox}`;
+      const hr = await fetch(hu);
+      if (hr.ok) {
+        const hd = await hr.json();
+        for (const feat of (hd.features || [])) {
+          const p = feat.properties || {};
+          const t = (p.typetext || '').toUpperCase();
+          if (!t.includes('HAIL')) continue;
+          const c = feat.geometry?.coordinates || [];
+          const elng = c[0], elat = c[1];
+          const dist = haversineMi(lat, lng, elat, elng);
+          if (dist > 10) continue;
+          hailEvents.push({
+            date: (p.utc_valid || p.valid || '').slice(0, 10),
+            type: 'hail',
+            magnitude: parseFloat(p.magnitude) || null,
+            unit: 'in diameter',
+            distance_mi: Math.round(dist * 10) / 10,
+            city: p.city || p.county || '',
+            remark: p.remark || '',
+            source: 'NWS Local Storm Reports (via Iowa State Mesonet)'
+          });
+        }
+      }
+    } catch (e) { console.error('[weather] mesonet failed', e.message); }
+
+    // Sort newest first, cap each list at 50
+    const allEvents = [...hailEvents, ...windEvents]
+      .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+      .slice(0, 100);
+
+    res.json({
+      ok: true,
+      location: { lat, lng, geocoded },
+      window: { start: fmt(start), end: fmt(end), days },
+      counts: { hail: hailEvents.length, wind: windEvents.length, total: hailEvents.length + windEvents.length },
+      events: allEvents
+    });
+  } catch (err) {
+    console.error('[weather/history]', err);
+    res.status(500).json({ error: 'weather_failed', detail: err.message });
+  }
+});
+
+function haversineMi(lat1, lng1, lat2, lng2) {
+  const R = 3958.8; // miles
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
 // ============ Stripe webhook ============
 async function handleStripeWebhook(req, res) {
   const sig = req.headers['stripe-signature'];
@@ -605,6 +723,93 @@ For each finding, set "cause_origin":
 - "storm-related" — evidence supports a storm peril (hail, wind)
 - "non-storm" — clear evidence of age, defect, or installer error
 - "ambiguous" — genuinely unclear; describe both possibilities
+
+Bias: when evidence is ambiguous, prefer "ambiguous" over "non-storm". Carriers can challenge ambiguous findings, but they cannot blanket-deny them.
+
+============================================================
+HAIL / WIND CONFIDENCE & CLAIM STRENGTH
+============================================================
+
+You will return three top-level fields:
+
+"hail_confidence":
+- "high" — clear circular impacts, fresh mat exposure, random distribution
+- "medium" — some indicators (e.g. localized granule loss in circular pattern) but missing fresh mat exposure or clear bruise
+- "low" — granule loss only, ambiguous pattern, single suspect spot
+- "none" — no hail indicators at all
+
+"wind_confidence":
+- "high" — clear shingle creasing (dark horizontal line on tab), lifted/missing tabs, broken seal strip, or multiple of these on adjacent tabs
+- "medium" — possible creasing or lifted tab visible but not definitive; one suspect tab; granule displacement at tab edges
+- "low" — minor edge granule loss, slightly raised tab, no clear crease or lift line
+- "none" — no wind indicators
+
+"claim_strength":
+- "strong" — multiple storm-related findings (hail OR wind OR both), severe or moderate severity, supports a full claim. A single clear creased shingle or a single fresh hail strike with mat exposure is sufficient for "strong" if well-documented.
+- "moderate" — at least one clearly documented storm-related finding
+- "weak" — only ambiguous or minor findings, may support a soft denial
+- "no-claim" — no storm-related findings; document for the record
+
+Pair these honestly. Don't inflate a "strong" claim from one cosmetic ding. But equally, don't downgrade a clear hail strike or creased shingle to "weak" because the roof also shows aging. Hail and wind are co-equal claim drivers.
+
+============================================================
+EVIDENCE CITATION
+============================================================
+
+For every finding, include an "evidence" field: 1-2 sentences citing the SPECIFIC visual indicator that justifies the category. Example: "Granules displaced in a 1-inch circular pattern with fresh black mat exposed at center; matching impacts on adjacent shingles." This is what the adjuster cites to the carrier. Be specific.
+
+If you classify something as "wear_tear" or "defect" or "non-storm", you must explain WHY in the evidence field — what rules out storm cause. "Uniform oxidation across the slope with no localized impact pattern" is acceptable. "Looks old" is not.
+
+============================================================
+OUTPUT — STRICT JSON, NO MARKDOWN FENCES
+============================================================
+
+{
+  "is_roof": true | false,
+  "not_roof_reason": "string if is_roof is false",
+  "overall_severity": "severe" | "moderate" | "minor" | "none",
+  "roof_material": "asphalt shingle" | "metal" | "tile" | "flat/membrane" | "unknown",
+  "image_quality": "good" | "fair" | "poor",
+  "image_quality_note": "string if not good",
+  "summary": "1-2 sentence plain-language summary that leads with cause/origin",
+  "test_square_assessment": "1-2 sentences about hit density. Empty string if no test square.",
+  "damage_categories_present": ["hail" | "wind" | "granular_loss" | "wear_tear" | "defect" | "other"],
+  "hail_confidence": "high" | "medium" | "low" | "none",
+  "wind_confidence": "high" | "medium" | "low" | "none",
+  "claim_strength": "strong" | "moderate" | "weak" | "no-claim",
+  "findings": [
+    {
+      "id": "F1",
+      "category": "hail" | "wind" | "granular_loss" | "wear_tear" | "defect" | "other",
+      "cause_origin": "storm-related" | "non-storm" | "ambiguous",
+      "type": "specific type (e.g. 'Circular hail impact with mat fracture')",
+      "severity": "severe" | "moderate" | "minor",
+      "description": "2-3 sentences. Lead with what you see, then what it means for the claim.",
+      "evidence": "1-2 sentences citing the specific visual indicator that justifies this category. The line the adjuster quotes to the carrier.",
+      "bbox": { "x": 0-100, "y": 0-100, "w": 0-100, "h": 0-100 }
+    }
+  ],
+  "adjuster_notes": "3-5 sentence narrative for the claim file. Lead with cause/origin determination. State the case for coverage affirmatively. If matching slopes are affected by the same storm, note it. Reference Florida/state-specific considerations where relevant (matching statute, recent reforms)."
+}
+
+If the image is not a roof at all: set is_roof: false, not_roof_reason describing what the image shows, findings: [], damage_categories_present: [], overall_severity: "none", hail_confidence: "none", wind_confidence: "none", claim_strength: "no-claim", adjuster_notes: "".`;
+}
+
+// ============ Boot ============
+async function boot() {
+  try {
+    await ensureSchema();
+    app.listen(port, () => {
+      console.log(`[boot] HailGrade API listening on :${port}`);
+    });
+  } catch (err) {
+    console.error('[boot] failed', err);
+    process.exit(1);
+  }
+}
+
+boot();
+guous" — genuinely unclear; describe both possibilities
 
 Bias: when evidence is ambiguous, prefer "ambiguous" over "non-storm". Carriers can challenge ambiguous findings, but they cannot blanket-deny them.
 
