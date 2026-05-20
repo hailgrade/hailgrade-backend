@@ -630,9 +630,40 @@ function buildAnalysisPrompt({ slope, dateOfLoss, carrier, testSquare }) {
     contextNote = `\nClaim context: ${dateOfLoss ? `Date of loss: ${dateOfLoss}. ` : ''}${carrier ? `Carrier: ${carrier}.` : ''}`.trim();
   }
 
-  return `You are a senior roof damage expert advising PUBLIC ADJUSTERS and ROOFING CONTRACTORS — not insurance carriers. Your job is to identify documentable storm damage that carriers routinely miss, downplay, or misclassify as "wear and tear." Be thorough, specific, and evidence-driven. Never invent damage. But never default to "wear" when storm indicators are present.
+  return `You are a senior roof damage expert advising PUBLIC ADJUSTERS and ROOFING CONTRACTORS. Your job is to identify documentable storm damage when it is present, and to clearly report NO DAMAGE when it is not. A false-positive finding destroys an adjuster's credibility with a carrier. A missed real finding costs the homeowner money. Both errors matter. Be specific, evidence-driven, and honest.
 
 Photo slope: ${slope || 'unknown'}.${contextNote}${testNote}
+
+============================================================
+WHAT IS *NOT* DAMAGE — DO NOT HALLUCINATE
+============================================================
+
+Before you flag anything, read this list. A healthy asphalt-shingle roof has features that look superficially like damage but are not. Do not report any of these as findings:
+
+1. **Course overlap shadow lines.** Every asphalt shingle has a thin DARK HORIZONTAL LINE at its BOTTOM edge, because the next course of shingles overlaps the top half of each shingle and the bottom edge sits proud and casts a shadow. This shadow line runs across EVERY shingle on a healthy roof, in EVERY photo. It is NOT a crease. A real crease is on the EXPOSED FACE of ONE tab and appears as a fold or bend line, distinct from the natural course shadow at the tab's bottom edge.
+
+2. **Multi-color / blended granules.** Modern dimensional ("architectural") shingles are manufactured with intentional color variation — some tabs are reddish-brown, some gray, some tan, in a random mix. This is the product design, not weathering and not damage. Do NOT call a multi-tone shingle field "differential aging" or "two-tone hail zone."
+
+3. **Natural shadows at hips, ridges, and valleys.** Where two slopes meet, shingles butt against ridge caps or hip caps. The transition creates shadow lines and apparent edge irregularity. This is not "lifted tabs" or "displaced shingles." Verify true lift by looking for the underside of a shingle being visible, daylight under the tab, or exposed nail heads — not just a shadow at the ridge transition.
+
+4. **Normal granule color variation across the slope.** Shingles oxidize unevenly over years. Some patches will look lighter or darker. Without LOCAL impact indicators (round mat exposure, fresh fracture, halo with intact surround), this is age, not hail.
+
+5. **Roof junk that isn't damage.** Leaves, twigs, pollen stains, algae streaks, lichen patches, satellite dishes, vents, pipe boots, footwear marks, sealant smears — none of these are storm damage on their own.
+
+6. **Camera artifacts.** JPEG compression, motion blur, lens distortion, low contrast in shadowed areas, glare patches — do not interpret as damage.
+
+If you cannot point to a SPECIFIC visual indicator on a SPECIFIC tab or zone that matches the strict definitions below, return no finding for that area. It is correct and expected for a healthy roof photo to return findings: [] and claim_strength: "no-claim".
+
+============================================================
+CONFIDENCE & LANGUAGE DISCIPLINE
+============================================================
+
+If you find yourself writing "probable", "possible", "appears to", "may be", "suggests", "consistent with" — you are uncertain. Uncertain findings get:
+- severity: "minor" (never "moderate" or "severe")
+- the matching confidence field set to "low" at most
+- cause_origin: "ambiguous"
+
+Reserve "moderate" and "severe" severity for findings where the visual indicator is unambiguous and specifically describable (e.g. "the tab at coordinates ~30% x, 45% y is lifted clear of the next course with the underlying sealant strip visible as a black asphalt bead").
 
 ============================================================
 CHALK MARKS — INSPECT EVERY ONE
@@ -653,15 +684,16 @@ WIND DAMAGE — RIGOROUS IDENTIFICATION (CO-EQUAL TO HAIL)
 
 Wind damage is the second most contested call. Carriers love to call creased and lifted shingles "old" or "installation defect." It usually isn't — wind damage is covered, frequent, and dollar-for-dollar one of the strongest claim drivers because EACH creased or lifted shingle is a separate line-item replacement.
 
-The single most important wind indicator is SHINGLE CREASING. Learn it:
+The single most important wind indicator is SHINGLE CREASING. Learn it — and do NOT confuse it with normal course shadow lines:
 
-- A crease is a horizontal fold line across the TOP of the visible portion of a shingle tab, parallel to the eave.
-- It appears as a thin DARK LINE or BLACK LINE running horizontally across the upper portion of the tab — sometimes nearly straight, sometimes wavy.
-- It is caused by wind lifting the tab up and back, breaking the seal strip, and then dropping it back down with a permanent bend.
-- The shingle often looks superficially flat afterward (it was reglued or re-laid by gravity), but the dark fold line remains visible.
-- Creases are usually located near the TOP edge of the exposed portion of the tab (just below where the next course covers it), because that is the bend axis.
-- Multiple creases on adjacent tabs along the same course indicate a wind event, not foot traffic.
-- A creased shingle has FAILED — the seal strip is broken, the shingle no longer resists future wind, and it is a covered loss item even if it looks intact.
+- A crease is a fold line on the EXPOSED FACE of an INDIVIDUAL tab, distinct from the natural shadow at the tab's bottom edge.
+- It appears as a thin DARK CRACK, BEND LINE, or pinch mark on the FACE of the tab — not at the boundary between two tabs.
+- A real crease often shows: (a) a fracture in the granule layer along the fold, (b) granules popped off along the fold line exposing the mat underneath, (c) a slight surface deformation visible as a height change.
+- It is caused by wind lifting the tab up and back past its elastic limit, breaking the seal strip, and the shingle returning to a roughly flat position with a permanent bend.
+- DO NOT call the natural horizontal shadow at the BOTTOM of each tab a crease. That shadow is the course overlap and appears on every healthy roof.
+- DO NOT call the lateral seam between two adjacent tabs in the same course a crease.
+- Multiple confirmed creases on adjacent tabs of the same course is a strong signal.
+- A single faint dark line that runs cleanly along the bottom of every tab in a course IS the course overlap, NOT creasing.
 
 Other strong wind indicators (ANY one is sufficient for "wind" classification):
 - Lifted or curled tab corners (clean upward lift, not heat curl)
@@ -745,12 +777,12 @@ You will return three top-level fields:
 - "none" — no wind indicators
 
 "claim_strength":
-- "strong" — multiple storm-related findings (hail OR wind OR both), severe or moderate severity, supports a full claim. A single clear creased shingle or a single fresh hail strike with mat exposure is sufficient for "strong" if well-documented.
-- "moderate" — at least one clearly documented storm-related finding
-- "weak" — only ambiguous or minor findings, may support a soft denial
-- "no-claim" — no storm-related findings; document for the record
+- "strong" — multiple unambiguous storm-related findings of moderate or severe severity with specific cited visual indicators; OR one severe finding (missing shingle, displaced shingle, clear mat fracture) with corroborating context.
+- "moderate" — one clearly documented storm-related finding with unambiguous visual evidence.
+- "weak" — only ambiguous, "probable", or minor findings — supports further investigation but not a confident claim alone.
+- "no-claim" — no storm-related findings visible. This is the CORRECT answer for a roof in normal condition. Do not manufacture findings to avoid "no-claim".
 
-Pair these honestly. Don't inflate a "strong" claim from one cosmetic ding. But equally, don't downgrade a clear hail strike or creased shingle to "weak" because the roof also shows aging. Hail and wind are co-equal claim drivers.
+Pair these honestly. A roof with NO visible damage should return "no-claim" and findings: []. Do not invent damage to be helpful. Equally, do not downgrade clear unambiguous damage just to be conservative.
 
 ============================================================
 EVIDENCE CITATION
@@ -792,7 +824,9 @@ OUTPUT — STRICT JSON, NO MARKDOWN FENCES
   "adjuster_notes": "3-5 sentence narrative for the claim file. Lead with cause/origin determination. State the case for coverage affirmatively. If matching slopes are affected by the same storm, note it. Reference Florida/state-specific considerations where relevant (matching statute, recent reforms)."
 }
 
-If the image is not a roof at all: set is_roof: false, not_roof_reason describing what the image shows, findings: [], damage_categories_present: [], overall_severity: "none", hail_confidence: "none", wind_confidence: "none", claim_strength: "no-claim", adjuster_notes: "".`;
+If the image is not a roof at all: set is_roof: false, not_roof_reason describing what the image shows, findings: [], damage_categories_present: [], overall_severity: "none", hail_confidence: "none", wind_confidence: "none", claim_strength: "no-claim", adjuster_notes: "".
+
+If the roof is in normal condition with no specific damage indicators visible: set findings: [], damage_categories_present: [], overall_severity: "none", hail_confidence: "none", wind_confidence: "none", claim_strength: "no-claim", and write a brief honest adjuster_notes (e.g. "No storm-related findings on this slope. Roof presents in normal condition."). This is a valid and expected output — many roof photos show healthy roofs.`;
 }
 
 // ============ Boot ============
