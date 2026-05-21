@@ -455,97 +455,95 @@ app.post('/weather/history', requireAuth, async (req, res) => {
     let { address, lat, lng, days } = req.body || {};
     days = Math.min(Math.max(parseInt(days, 10) || 365, 7), 730);
 
-    // 1. Geocode address if no lat/lng provided
+    // 1. Geocode the address when no GPS coords were supplied
     let geocoded = null;
     if ((!lat || !lng) && address) {
-      const u = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`;
-      const gr = await fetch(u, { headers: { 'User-Agent': 'HailGrade/1.0 (claims@smithadjusters.com)' } });
+      const gu = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(address);
+      const gr = await fetch(gu, { headers: { 'User-Agent': 'HailGrade/1.0 (claims@smithadjusters.com)' } });
       if (gr.ok) {
         const arr = await gr.json();
         if (arr.length) { lat = parseFloat(arr[0].lat); lng = parseFloat(arr[0].lon); geocoded = { display: arr[0].display_name }; }
       }
     }
-    if (!lat || !lng) return res.status(400).json({ error: 'no_location', detail: 'Address could not be geocoded and no GPS provided' });
+    if (!lat || !lng) return res.status(400).json({ error: 'no_location', detail: 'Could not geocode the address and no GPS was provided.' });
+    lat = parseFloat(lat); lng = parseFloat(lng);
 
+    // 2. Find the NWS forecast office (WFO) covering this point
+    let wfo = null, placeCity = null, placeState = null;
+    try {
+      const pr = await fetch('https://api.weather.gov/points/' + lat.toFixed(4) + ',' + lng.toFixed(4), {
+        headers: { 'User-Agent': 'HailGrade/1.0 (claims@smithadjusters.com)', 'Accept': 'application/geo+json' }
+      });
+      if (pr.ok) {
+        const pd = await pr.json();
+        wfo = pd.properties && pd.properties.cwa;
+        const rl = pd.properties && pd.properties.relativeLocation && pd.properties.relativeLocation.properties;
+        if (rl) { placeCity = rl.city; placeState = rl.state; }
+      }
+    } catch (e) { console.error('[weather] NWS points failed', e.message); }
+    if (!wfo) return res.status(502).json({ error: 'no_office', detail: 'Could not determine the NWS forecast office for this location.' });
+
+    // 3. Pull NWS Local Storm Reports for that office over the time window
     const end = new Date();
     const start = new Date(end.getTime() - days * 86400 * 1000);
-    const fmt = d => d.toISOString().slice(0, 10);
-
-    // 2. Wind gusts from Open-Meteo Historical
-    const windEvents = [];
+    const sts = start.toISOString().slice(0, 16) + 'Z';
+    const ets = end.toISOString().slice(0, 16) + 'Z';
+    const lsrUrl = 'https://mesonet.agron.iastate.edu/cgi-bin/request/gis/lsr.py?sts=' + sts + '&ets=' + ets + '&wfo=' + wfo + '&fmt=csv';
+    let csv = '';
     try {
-      const wu = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&start_date=${fmt(start)}&end_date=${fmt(end)}&daily=wind_gusts_10m_max,wind_speed_10m_max&wind_speed_unit=mph&timezone=auto`;
-      const wr = await fetch(wu);
-      if (wr.ok) {
-        const wd = await wr.json();
-        const dates = wd.daily?.time || [];
-        const gusts = wd.daily?.wind_gusts_10m_max || [];
-        const winds = wd.daily?.wind_speed_10m_max || [];
-        for (let i = 0; i < dates.length; i++) {
-          const gust = gusts[i];
-          const wind = winds[i];
-          // 50 mph gust threshold for documentable wind event
-          if (gust != null && gust >= 50) {
-            windEvents.push({
-              date: dates[i],
-              type: 'wind',
-              magnitude: Math.round(gust),
-              unit: 'mph gust',
-              sustained: wind != null ? Math.round(wind) : null,
-              distance_mi: 0,
-              source: 'Open-Meteo Historical / ERA5'
-            });
-          }
-        }
-      }
-    } catch (e) { console.error('[weather] open-meteo failed', e.message); }
+      const lr = await fetch(lsrUrl);
+      if (lr.ok) csv = await lr.text();
+    } catch (e) { console.error('[weather] LSR fetch failed', e.message); }
 
-    // 3. Hail reports from Iowa State Mesonet — NWS Local Storm Reports within ~10mi radius
-    const hailEvents = [];
-    try {
-      // ~10mi bounding box
-      const dlat = 10 / 69;            // ~10mi latitude
-      const dlng = 10 / (69 * Math.cos(lat * Math.PI / 180));
-      const bbox = `${lng - dlng},${lat - dlat},${lng + dlng},${lat + dlat}`;
-      const sts = fmt(start) + 'T00:00';
-      const ets = fmt(end) + 'T23:59';
-      const hu = `https://mesonet.agron.iastate.edu/geojson/lsr.geojson?sts=${sts}&ets=${ets}&bbox=${bbox}`;
-      const hr = await fetch(hu);
-      if (hr.ok) {
-        const hd = await hr.json();
-        for (const feat of (hd.features || [])) {
-          const p = feat.properties || {};
-          const t = (p.typetext || '').toUpperCase();
-          if (!t.includes('HAIL')) continue;
-          const c = feat.geometry?.coordinates || [];
-          const elng = c[0], elat = c[1];
-          const dist = haversineMi(lat, lng, elat, elng);
-          if (dist > 10) continue;
-          hailEvents.push({
-            date: (p.utc_valid || p.valid || '').slice(0, 10),
-            type: 'hail',
-            magnitude: parseFloat(p.magnitude) || null,
-            unit: 'in diameter',
-            distance_mi: Math.round(dist * 10) / 10,
-            city: p.city || p.county || '',
-            remark: p.remark || '',
-            source: 'NWS Local Storm Reports (via Iowa State Mesonet)'
-          });
-        }
-      }
-    } catch (e) { console.error('[weather] mesonet failed', e.message); }
+    // 4. Parse the CSV into hail + wind events within ~25 miles of the property.
+    // Columns: VALID,VALID2,LAT,LON,MAG,WFO,TYPECODE,TYPETEXT,CITY,COUNTY,STATE,SOURCE,REMARK,UGC,UGCNAME,QUALIFIER
+    const hailEvents = [], windEvents = [];
+    const lines = csv.split(/\r?\n/);
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line) continue;
+      const c = line.split(',');
+      if (c.length < 13) continue;
+      const elat = parseFloat(c[2]), elng = parseFloat(c[3]);
+      if (!isFinite(elat) || !isFinite(elng)) continue;
+      const typetext = (c[7] || '').toUpperCase();
+      const isHail = typetext.indexOf('HAIL') !== -1;
+      const isWind = typetext.indexOf('WND') !== -1 || typetext.indexOf('WIND') !== -1;
+      if (!isHail && !isWind) continue;
+      const dist = haversineMi(lat, lng, elat, elng);
+      if (dist > 25) continue;
+      const v = c[0] || '';
+      const date = v.length >= 8 ? (v.slice(0,4) + '-' + v.slice(4,6) + '-' + v.slice(6,8)) : '';
+      const mag = parseFloat(c[4]);
+      const remark = c.slice(12, Math.max(13, c.length - 3)).join(',').trim();
+      const ev = {
+        date: date,
+        type: isHail ? 'hail' : 'wind',
+        magnitude: (isFinite(mag) && mag > 0) ? mag : null,
+        unit: isHail ? 'in' : 'mph',
+        type_text: c[7] || '',
+        distance_mi: Math.round(dist * 10) / 10,
+        city: c[8] || '',
+        county: c[9] || '',
+        remark: remark.slice(0, 180),
+        source: 'NWS Local Storm Report'
+      };
+      if (isHail) hailEvents.push(ev); else windEvents.push(ev);
+    }
 
-    // Sort newest first, cap each list at 50
-    const allEvents = [...hailEvents, ...windEvents]
-      .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
-      .slice(0, 100);
+    const events = hailEvents.concat(windEvents)
+      .sort((x, y) => {
+        if (x.date !== y.date) return (y.date || '').localeCompare(x.date || '');
+        return x.distance_mi - y.distance_mi;
+      })
+      .slice(0, 120);
 
     res.json({
       ok: true,
-      location: { lat, lng, geocoded },
-      window: { start: fmt(start), end: fmt(end), days },
+      location: { lat: lat, lng: lng, wfo: wfo, city: placeCity, state: placeState, geocoded: geocoded },
+      window: { start: start.toISOString().slice(0,10), end: end.toISOString().slice(0,10), days: days },
       counts: { hail: hailEvents.length, wind: windEvents.length, total: hailEvents.length + windEvents.length },
-      events: allEvents
+      events: events
     });
   } catch (err) {
     console.error('[weather/history]', err);
@@ -554,7 +552,7 @@ app.post('/weather/history', requireAuth, async (req, res) => {
 });
 
 function haversineMi(lat1, lng1, lat2, lng2) {
-  const R = 3958.8; // miles
+  const R = 3958.8;
   const toRad = d => d * Math.PI / 180;
   const dLat = toRad(lat2 - lat1);
   const dLng = toRad(lng2 - lng1);
