@@ -785,6 +785,24 @@ Any ONE of these is a STRONG hail indicator (sufficient for "hail" classificatio
 Hail on asphalt shingles often shows as a halo: a center spot where the mat is fractured, surrounded by a ring where granules are displaced. Look for this signature.
 
 ============================================================
+HAIL ON CLOSE-UP PHOTOS — COMMIT TO THE FINDING
+============================================================
+
+A close-up shingle photo is taken for ONE reason: the field adjuster already sees a hail hit and wants it documented. On a tight close-up framed on a shingle, COMMIT to the finding. Do not return "no damage" on a tight close-up unless the shingle is genuinely clean.
+
+A hail bruise does NOT always look like a dark exposed-mat crater. It very commonly appears as:
+- A LIGHTER circular spot — the impact knocked colored granules loose and exposed the paler granule layer beneath, or scuffed the surface lighter
+- A circular spot of DISTURBED TEXTURE — granules pocked, scuffed, crushed, or shoved aside — even when the color barely differs from the shingle around it
+- A soft round depression that catches light differently from the flat shingle surface
+- A self-contained round spot roughly 1/4" to 1.5" across, with the shingle immediately around it untouched
+
+TEXTURE is the proof, not color. If granules inside a discrete round area look scuffed, pocked, crushed, or displaced, that is a hail impact — whether the spot is lighter OR darker than its surroundings.
+
+PROHIBITED DISMISSALS. For a discrete, roughly circular spot you must NOT explain it away as "sunlight reflection," "sun differential," "glare," "shadow," "uneven lighting," or "camera flash." Sunlight and shadow fall across a roof in broad gradients with soft edges — they physically cannot create a single isolated round spot a couple of inches wide surrounded by normal shingle. A discrete circular spot was made by an impact, not by light. Classify it as hail.
+
+The ONLY innocent explanation for a discrete round spot is a manufacturer color-granule blend — but a color blend has the SAME smooth, intact granule texture as the rest of the shingle; only the color differs. If the texture inside the spot is disturbed, it is hail, not a blend. When a close-up is genuinely ambiguous, classify it as hail and document the indicators in adjuster_notes.
+
+============================================================
 GRANULAR LOSS — DIFFERENTIAL DIAGNOSIS
 ============================================================
 
