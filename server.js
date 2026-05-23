@@ -684,6 +684,27 @@ app.get("/contracts/template/file", requireAuth, async (req, res) => {
   }
 });
 
+app.get("/contracts/signed/:id", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    if (!DS_API_KEY) return res.status(500).json({ error: "E-signature is not configured" });
+    const rows = dsRowsOf(await q("SELECT signature_request_id, status, signer_name FROM contracts WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]));
+    if (!rows.length) return res.status(404).json({ error: "Contract not found" });
+    const row = rows[0];
+    if (!row.signature_request_id) return res.status(400).json({ error: "No signed document available" });
+    const dsRes = await fetch(DS_BASE + "/signature_request/files/" + encodeURIComponent(row.signature_request_id) + "?file_type=pdf", {
+      headers: { "Authorization": dsAuthHeader() }
+    });
+    if (!dsRes.ok) return res.status(502).json({ error: "The signed document is not ready yet" });
+    const buf = Buffer.from(await dsRes.arrayBuffer());
+    const safeName = String(row.signer_name || "contract").replace(/[^a-zA-Z0-9]+/g, "-");
+    res.json({ filename: "Signed-" + safeName + ".pdf", pdf_base64: buf.toString("base64") });
+  } catch (e) {
+    console.error("[contracts/signed]", e);
+    res.status(500).json({ error: "Could not load the signed document" });
+  }
+});
+
 /* =================== END CONTRACTS / E-SIGNATURE =================== */
 
 function haversineMi(lat1, lng1, lat2, lng2) {
