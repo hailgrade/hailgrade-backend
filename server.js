@@ -15,6 +15,7 @@ import cors from 'cors';
 import Stripe from 'stripe';
 import { pool, q, one, ensureSchema } from './db.js';
 import { hashPassword, checkPassword, signToken, requireAuth, requireActiveSubscription } from './auth.js';
+import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
 // Trim whitespace from every env var on boot — Render's UI can leave hidden newlines
 // in pasted secrets, which breaks Stripe webhook signature verification etc.
@@ -559,6 +560,7 @@ async function ensureContractsSchema() {
   if (_contractsSchemaReady) return;
   await q("CREATE TABLE IF NOT EXISTS user_contracts (user_id INTEGER PRIMARY KEY, filename TEXT, pdf_base64 TEXT, uploaded_at TIMESTAMPTZ DEFAULT now())");
   await q("CREATE TABLE IF NOT EXISTS contracts (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, claim_local_id TEXT, claim_name TEXT, signer_name TEXT, signer_email TEXT, signature_request_id TEXT, status TEXT DEFAULT 'sent', signed_pdf_url TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now())");
+  try { await q("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS price TEXT"); } catch (e) {}
   _contractsSchemaReady = true;
 }
 function dsAuthHeader() {
@@ -604,6 +606,9 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     const tpl = dsRowsOf(await q("SELECT filename, pdf_base64 FROM user_contracts WHERE user_id=$1", [req.user.id]));
     if (!tpl.length) return res.status(400).json({ error: "Upload your contract first" });
     const pdfBuf = Buffer.from(tpl[0].pdf_base64, "base64");
+    let mergedBuf;
+    try { mergedBuf = await buildAgreementPdf(pdfBuf, body, req.user); }
+    catch (e) { console.error("[contracts/send] merge", e); return res.status(500).json({ error: "Could not build the agreement PDF. Try re-uploading your contract." }); }
     const form = new FormData();
     const claimName = body.claim_name || "";
     form.append("title", "Roofing Agreement" + (claimName ? " - " + claimName : ""));
@@ -614,7 +619,9 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     form.append("signers[0][order]", "0");
     form.append("cc_email_addresses[0]", req.user.email);
     form.append("test_mode", "1");
-    form.append("file[0]", new Blob([pdfBuf], { type: "application/pdf" }), tpl[0].filename || "contract.pdf");
+    form.append("use_text_tags", "1");
+    form.append("hide_text_tags", "1");
+    form.append("file[0]", new Blob([mergedBuf], { type: "application/pdf" }), "roofing-agreement.pdf");
     const dsRes = await fetch(DS_BASE + "/signature_request/send", { method: "POST", headers: { "Authorization": dsAuthHeader() }, body: form });
     const dsJson = await dsRes.json().catch(() => ({}));
     if (!dsRes.ok) {
@@ -624,7 +631,7 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     }
     const sr = dsJson.signature_request || {};
     const srId = sr.signature_request_id || "";
-    const ins = dsRowsOf(await q("INSERT INTO contracts (user_id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status) VALUES ($1,$2,$3,$4,$5,$6,'sent') RETURNING id", [req.user.id, body.claim_local_id || null, claimName || null, signerName, signerEmail, srId]));
+    const ins = dsRowsOf(await q("INSERT INTO contracts (user_id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status, price) VALUES ($1,$2,$3,$4,$5,$6,'sent',$7) RETURNING id", [req.user.id, body.claim_local_id || null, claimName || null, signerName, signerEmail, srId, body.price || null]));
     res.json({ ok: true, id: ins[0] ? ins[0].id : null, signature_request_id: srId, status: "sent" });
   } catch (e) {
     console.error("[contracts/send]", e);
@@ -706,6 +713,94 @@ app.get("/contracts/signed/:id", requireAuth, async (req, res) => {
 });
 
 /* =================== END CONTRACTS / E-SIGNATURE =================== */
+
+/* ===================== AGREEMENT SUMMARY PAGE ===================== */
+function apWrap(text, font, size, maxWidth) {
+  var words = String(text == null ? "" : text).split(" ");
+  var lines = [], line = "";
+  for (var i = 0; i < words.length; i++) {
+    var w = words[i];
+    if (!w) continue;
+    var test = line ? line + " " + w : w;
+    if (font.widthOfTextAtSize(test, size) > maxWidth && line) { lines.push(line); line = w; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+async function buildAgreementPdf(contractBytes, body, user) {
+  body = body || {};
+  const merged = await PDFDocument.create();
+  const font = await merged.embedFont(StandardFonts.Helvetica);
+  const bold = await merged.embedFont(StandardFonts.HelveticaBold);
+  const W = 612, H = 792, M = 56;
+  const ink = rgb(0.17, 0.15, 0.13);
+  const muted = rgb(0.49, 0.45, 0.40);
+  const accent = rgb(1, 0.42, 0.21);
+  const page = merged.addPage([W, H]);
+  let y = H - 62;
+  const firm = String(body.firm_name || "Roofing Agreement");
+  page.drawText(firm.toUpperCase().slice(0, 46), { x: M, y: y, size: 18, font: bold, color: ink });
+  y -= 20;
+  page.drawText("Service Agreement and Scope of Work", { x: M, y: y, size: 11, font: font, color: muted });
+  y -= 14;
+  page.drawLine({ start: { x: M, y: y }, end: { x: W - M, y: y }, thickness: 2, color: accent });
+  y -= 30;
+  function section(label) {
+    page.drawText(label, { x: M, y: y, size: 9, font: bold, color: accent });
+    y -= 18;
+  }
+  function row(label, value) {
+    if (value == null || value === "") return;
+    page.drawText(String(label).toUpperCase(), { x: M, y: y, size: 8.5, font: bold, color: muted });
+    var v = String(value);
+    page.drawText(v.length > 60 ? v.slice(0, 57) + "..." : v, { x: M + 145, y: y, size: 11, font: font, color: ink });
+    y -= 21;
+  }
+  section("CLIENT AND PROPERTY");
+  row("Client", body.signer_name);
+  row("Email", body.signer_email);
+  row("Phone", body.signer_phone);
+  row("Property", body.property_address);
+  row("Insurance Carrier", body.carrier);
+  row("Claim Number", body.claim_number);
+  row("Date of Loss", body.date_of_loss);
+  y -= 10;
+  section("PRICING");
+  page.drawRectangle({ x: M, y: y - 26, width: W - 2 * M, height: 46, color: rgb(0.96, 0.93, 0.85) });
+  page.drawText("CONTRACT PRICE", { x: M + 14, y: y + 4, size: 8.5, font: bold, color: muted });
+  page.drawText(String(body.price || "To be determined"), { x: M + 14, y: y - 16, size: 17, font: bold, color: ink });
+  y -= 48;
+  if (body.scope && String(body.scope).trim()) {
+    y -= 14;
+    section("SCOPE OF WORK");
+    var sl = apWrap(body.scope, font, 10, W - 2 * M);
+    for (var si = 0; si < sl.length && y > 232; si++) { page.drawText(sl[si], { x: M, y: y, size: 10, font: font, color: ink }); y -= 14; }
+  }
+  y -= 22;
+  var agree = "By signing below, the client authorizes " + firm + " to perform the work described above at the stated price. The complete terms and conditions follow on the attached pages and form part of this agreement.";
+  var al = apWrap(agree, font, 9, W - 2 * M);
+  for (var ai = 0; ai < al.length; ai++) { page.drawText(al[ai], { x: M, y: y, size: 9, font: font, color: muted }); y -= 12.5; }
+  y -= 46;
+  page.drawLine({ start: { x: M, y: y }, end: { x: M + 235, y: y }, thickness: 1, color: ink });
+  page.drawLine({ start: { x: W - M - 150, y: y }, end: { x: W - M, y: y }, thickness: 1, color: ink });
+  page.drawText("[sig|req|signer1]", { x: M, y: y + 7, size: 6, font: font, color: rgb(1, 1, 1) });
+  page.drawText("[date|req|signer1]", { x: W - M - 150, y: y + 7, size: 6, font: font, color: rgb(1, 1, 1) });
+  y -= 13;
+  page.drawText("Client Signature", { x: M, y: y, size: 8.5, font: font, color: muted });
+  page.drawText("Date Signed", { x: W - M - 150, y: y, size: 8.5, font: font, color: muted });
+  try {
+    const src = await PDFDocument.load(contractBytes, { ignoreEncryption: true });
+    const copied = await merged.copyPages(src, src.getPageIndices());
+    for (var ci = 0; ci < copied.length; ci++) merged.addPage(copied[ci]);
+  } catch (e) {
+    console.error("[buildAgreementPdf] contract merge failed", e);
+    throw new Error("contract-merge-failed");
+  }
+  return await merged.save();
+}
+/* =================== END AGREEMENT SUMMARY PAGE =================== */
 
 function haversineMi(lat1, lng1, lat2, lng2) {
   const R = 3958.8;
