@@ -551,6 +551,129 @@ app.post('/weather/history', requireAuth, async (req, res) => {
   }
 });
 
+/* ===================== CONTRACTS / E-SIGNATURE ===================== */
+const DS_API_KEY = process.env.DROPBOX_SIGN_API_KEY || "";
+const DS_BASE = "https://api.hellosign.com/v3";
+let _contractsSchemaReady = false;
+async function ensureContractsSchema() {
+  if (_contractsSchemaReady) return;
+  await q("CREATE TABLE IF NOT EXISTS user_contracts (user_id INTEGER PRIMARY KEY, filename TEXT, pdf_base64 TEXT, uploaded_at TIMESTAMPTZ DEFAULT now())");
+  await q("CREATE TABLE IF NOT EXISTS contracts (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, claim_local_id TEXT, claim_name TEXT, signer_name TEXT, signer_email TEXT, signature_request_id TEXT, status TEXT DEFAULT 'sent', signed_pdf_url TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now())");
+  _contractsSchemaReady = true;
+}
+function dsAuthHeader() {
+  return "Basic " + Buffer.from(DS_API_KEY + ":").toString("base64");
+}
+function dsRowsOf(r) { return Array.isArray(r) ? r : (r && r.rows ? r.rows : []); }
+
+app.post("/contracts/template", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    const body = req.body || {};
+    if (!body.pdf_base64) return res.status(400).json({ error: "Missing contract file" });
+    const clean = String(body.pdf_base64).replace(/^data:[^,]*,/, "");
+    const fn = body.filename || "contract.pdf";
+    await q("INSERT INTO user_contracts (user_id, filename, pdf_base64, uploaded_at) VALUES ($1,$2,$3, now()) ON CONFLICT (user_id) DO UPDATE SET filename=$2, pdf_base64=$3, uploaded_at=now()", [req.user.id, fn, clean]);
+    res.json({ ok: true, filename: fn });
+  } catch (e) {
+    console.error("[contracts/template]", e);
+    res.status(500).json({ error: "Could not save contract" });
+  }
+});
+
+app.get("/contracts/template", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    const rows = dsRowsOf(await q("SELECT filename, uploaded_at FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    if (!rows.length) return res.json({ hasTemplate: false });
+    res.json({ hasTemplate: true, filename: rows[0].filename, uploaded_at: rows[0].uploaded_at });
+  } catch (e) {
+    console.error("[contracts/template:get]", e);
+    res.status(500).json({ error: "Could not load contract" });
+  }
+});
+
+app.post("/contracts/send", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    if (!DS_API_KEY) return res.status(500).json({ error: "E-signature is not configured" });
+    const body = req.body || {};
+    const signerName = (body.signer_name || "").trim();
+    const signerEmail = (body.signer_email || "").trim();
+    if (!signerName || !signerEmail) return res.status(400).json({ error: "Client name and email are required" });
+    const tpl = dsRowsOf(await q("SELECT filename, pdf_base64 FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    if (!tpl.length) return res.status(400).json({ error: "Upload your contract first" });
+    const pdfBuf = Buffer.from(tpl[0].pdf_base64, "base64");
+    const form = new FormData();
+    const claimName = body.claim_name || "";
+    form.append("title", "Roofing Agreement" + (claimName ? " - " + claimName : ""));
+    form.append("subject", "Please sign your roofing agreement");
+    form.append("message", "Please review and sign your roofing agreement. A signed copy will be emailed to all parties once complete.");
+    form.append("signers[0][name]", signerName);
+    form.append("signers[0][email_address]", signerEmail);
+    form.append("signers[0][order]", "0");
+    form.append("cc_email_addresses[0]", req.user.email);
+    form.append("test_mode", "1");
+    form.append("file[0]", new Blob([pdfBuf], { type: "application/pdf" }), tpl[0].filename || "contract.pdf");
+    const dsRes = await fetch(DS_BASE + "/signature_request/send", { method: "POST", headers: { "Authorization": dsAuthHeader() }, body: form });
+    const dsJson = await dsRes.json().catch(() => ({}));
+    if (!dsRes.ok) {
+      console.error("[contracts/send] provider error", dsRes.status, JSON.stringify(dsJson));
+      const msg = (dsJson && dsJson.error && dsJson.error.error_msg) || "E-signature provider rejected the request";
+      return res.status(502).json({ error: msg });
+    }
+    const sr = dsJson.signature_request || {};
+    const srId = sr.signature_request_id || "";
+    const ins = dsRowsOf(await q("INSERT INTO contracts (user_id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status) VALUES ($1,$2,$3,$4,$5,$6,'sent') RETURNING id", [req.user.id, body.claim_local_id || null, claimName || null, signerName, signerEmail, srId]));
+    res.json({ ok: true, id: ins[0] ? ins[0].id : null, signature_request_id: srId, status: "sent" });
+  } catch (e) {
+    console.error("[contracts/send]", e);
+    res.status(500).json({ error: "Could not send contract" });
+  }
+});
+
+app.get("/contracts/list", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    const cid = req.query.claim_local_id;
+    let rows;
+    if (cid) {
+      rows = dsRowsOf(await q("SELECT id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status, signed_pdf_url, created_at, updated_at FROM contracts WHERE user_id=$1 AND claim_local_id=$2 ORDER BY created_at DESC", [req.user.id, cid]));
+    } else {
+      rows = dsRowsOf(await q("SELECT id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status, signed_pdf_url, created_at, updated_at FROM contracts WHERE user_id=$1 ORDER BY created_at DESC", [req.user.id]));
+    }
+    res.json({ contracts: rows });
+  } catch (e) {
+    console.error("[contracts/list]", e);
+    res.status(500).json({ error: "Could not load contracts" });
+  }
+});
+
+app.get("/contracts/status/:id", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    const rows = dsRowsOf(await q("SELECT id, signature_request_id, status FROM contracts WHERE id=$1 AND user_id=$2", [req.params.id, req.user.id]));
+    if (!rows.length) return res.status(404).json({ error: "Contract not found" });
+    const row = rows[0];
+    if (!row.signature_request_id || !DS_API_KEY) return res.json({ status: row.status });
+    const dsRes = await fetch(DS_BASE + "/signature_request/" + encodeURIComponent(row.signature_request_id), { headers: { "Authorization": dsAuthHeader() } });
+    const dsJson = await dsRes.json().catch(() => ({}));
+    if (!dsRes.ok) return res.json({ status: row.status });
+    const sr = dsJson.signature_request || {};
+    const sigs = sr.signatures || [];
+    let status = "sent";
+    if (sr.is_complete) status = "signed";
+    else if (sigs.some(function(s){ return s.status_code === "declined"; })) status = "declined";
+    const signedUrl = sr.files_url || null;
+    await q("UPDATE contracts SET status=$1, signed_pdf_url=COALESCE($2, signed_pdf_url), updated_at=now() WHERE id=$3", [status, signedUrl, row.id]);
+    res.json({ status: status, signed_pdf_url: signedUrl, is_complete: !!sr.is_complete });
+  } catch (e) {
+    console.error("[contracts/status]", e);
+    res.status(500).json({ error: "Could not refresh status" });
+  }
+});
+/* =================== END CONTRACTS / E-SIGNATURE =================== */
+
 function haversineMi(lat1, lng1, lat2, lng2) {
   const R = 3958.8;
   const toRad = d => d * Math.PI / 180;
