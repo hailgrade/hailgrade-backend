@@ -672,6 +672,18 @@ app.get("/contracts/status/:id", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Could not refresh status" });
   }
 });
+app.get("/contracts/template/file", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    const rows = dsRowsOf(await q("SELECT filename, pdf_base64, uploaded_at FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    if (!rows.length) return res.status(404).json({ error: "No contract on file" });
+    res.json({ filename: rows[0].filename, pdf_base64: rows[0].pdf_base64, uploaded_at: rows[0].uploaded_at });
+  } catch (e) {
+    console.error("[contracts/template/file]", e);
+    res.status(500).json({ error: "Could not load contract file" });
+  }
+});
+
 /* =================== END CONTRACTS / E-SIGNATURE =================== */
 
 function haversineMi(lat1, lng1, lat2, lng2) {
