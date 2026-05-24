@@ -802,6 +802,65 @@ async function buildAgreementPdf(contractBytes, body, user) {
 }
 /* =================== END AGREEMENT SUMMARY PAGE =================== */
 
+
+/* ===================== ROOF MEASUREMENT (Google Solar API) ===================== */
+async function geocodeUS(address) {
+  try {
+    const u = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?address=" +
+      encodeURIComponent(address) + "&benchmark=2020&format=json";
+    const r = await fetch(u);
+    const j = await r.json().catch(() => ({}));
+    const m = j && j.result && j.result.addressMatches && j.result.addressMatches[0];
+    if (m && m.coordinates) return { lat: Number(m.coordinates.y), lng: Number(m.coordinates.x) };
+  } catch (e) { console.error("[geocodeUS]", e); }
+  return null;
+}
+
+app.post("/roof/measure", requireAuth, async (req, res) => {
+  try {
+    const key = process.env.GOOGLE_SOLAR_API_KEY || "";
+    if (!key) return res.status(503).json({ error: "Roof measurement is not set up yet" });
+    const body = req.body || {};
+    let lat = (typeof body.lat === "number") ? body.lat : null;
+    let lng = (typeof body.lng === "number") ? body.lng : null;
+    if ((lat == null || lng == null) && body.address) {
+      const g = await geocodeUS(String(body.address));
+      if (!g) return res.status(404).json({ error: "Could not locate that address" });
+      lat = g.lat; lng = g.lng;
+    }
+    if (lat == null || lng == null || isNaN(lat) || isNaN(lng)) {
+      return res.status(400).json({ error: "Need a property address or photo GPS" });
+    }
+    const url = "https://solar.googleapis.com/v1/buildingInsights:findClosest?location.latitude=" +
+      encodeURIComponent(lat) + "&location.longitude=" + encodeURIComponent(lng) +
+      "&key=" + encodeURIComponent(key);
+    const r = await fetch(url);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      if (r.status === 404) return res.status(404).json({ error: "No roof imagery available for this property" });
+      console.error("[roof/measure] solar error", r.status, JSON.stringify(j).slice(0, 300));
+      return res.status(502).json({ error: "Roof measurement service is unavailable" });
+    }
+    const sp = j.solarPotential || {};
+    const stats = sp.wholeRoofStats || {};
+    const areaM2 = Number(stats.areaMeters2 || 0);
+    if (!areaM2) return res.status(404).json({ error: "No roof area found for this property" });
+    const sqft = areaM2 * 10.76391;
+    const segments = Array.isArray(sp.roofSegmentStats) ? sp.roofSegmentStats.length : null;
+    res.json({
+      squares: Math.round((sqft / 100) * 10) / 10,
+      area_sqft: Math.round(sqft),
+      area_m2: Math.round(areaM2),
+      segments: segments,
+      lat: lat, lng: lng
+    });
+  } catch (e) {
+    console.error("[roof/measure]", e);
+    res.status(500).json({ error: "Could not measure the roof" });
+  }
+});
+/* =================== END ROOF MEASUREMENT =================== */
+
 function haversineMi(lat1, lng1, lat2, lng2) {
   const R = 3958.8;
   const toRad = d => d * Math.PI / 180;
