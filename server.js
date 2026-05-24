@@ -576,7 +576,7 @@ app.post("/contracts/template", requireAuth, async (req, res) => {
     if (!body.pdf_base64) return res.status(400).json({ error: "Missing contract file" });
     const clean = String(body.pdf_base64).replace(/^data:[^,]*,/, "");
     const fn = body.filename || "contract.pdf";
-    await q("INSERT INTO user_contracts (user_id, filename, pdf_base64, uploaded_at) VALUES ($1,$2,$3, now()) ON CONFLICT (user_id) DO UPDATE SET filename=$2, pdf_base64=$3, uploaded_at=now()", [req.user.id, fn, clean]);
+    await q("INSERT INTO user_contracts (user_id, filename, pdf_base64, uploaded_at) VALUES ($1,$2,$3, now()) ON CONFLICT (user_id) DO UPDATE SET filename=$2, pdf_base64=$3, uploaded_at=now(), field_map=NULL", [req.user.id, fn, clean]);
     res.json({ ok: true, filename: fn });
   } catch (e) {
     console.error("[contracts/template]", e);
