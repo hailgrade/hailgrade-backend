@@ -991,6 +991,22 @@ async function renderContractPdf(doc, opts) {
   function newPage() { page = pdf.addPage([W, H]); y = H - M; }
   function need(hh) { if (y - hh < M + 14) newPage(); }
   function todayStr() { return new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }); }
+  function wa(v) {
+    var s = String(v == null ? "" : v);
+    var map = { 8216:39, 8217:39, 8218:39, 8219:39, 8242:39, 8220:34, 8221:34, 8222:34, 8223:34, 8243:34, 8208:45, 8209:45, 8210:45, 8211:45, 8212:45, 8213:45, 8722:45, 8226:45, 8227:45, 9679:45, 9642:45, 183:45, 8259:45, 160:32, 8194:32, 8195:32, 8201:32, 8202:32, 8199:32, 8239:32, 8203:-1, 8204:-1, 8205:-1, 65279:-1 };
+    var out = "";
+    for (var i = 0; i < s.length; i++) {
+      var cc = s.charCodeAt(i);
+      if (cc === 10 || cc === 13 || cc === 9 || cc === 12 || cc === 11) { out = out + " "; continue; }
+      if (map.hasOwnProperty(cc)) { var mm = map[cc]; if (mm >= 0) out = out + String.fromCharCode(mm); continue; }
+      if (cc === 8230) { out = out + "..."; continue; }
+      if (cc === 8482) { out = out + "(TM)"; continue; }
+      if (cc === 64257) { out = out + "fi"; continue; }
+      if (cc === 64258) { out = out + "fl"; continue; }
+      if ((cc >= 32 && cc <= 126) || (cc >= 160 && cc <= 255)) { out = out + s.charAt(i); continue; }
+    }
+    return out;
+  }
   function valueFor(id) {
     if (id === "client_name") return body.signer_name || body.claim_name || "";
     if (id === "property_address") return body.property_address || body.address || "";
@@ -1004,7 +1020,7 @@ async function renderContractPdf(doc, opts) {
     return "";
   }
   function drawWrapped(text, fnt, size, color, lh) {
-    var ls = apWrap(String(text == null ? "" : text), fnt, size, CW);
+    var ls = apWrap(wa(text), fnt, size, CW);
     for (var i = 0; i < ls.length; i++) {
       need(lh);
       page.drawText(ls[i], { x: M, y: y - size, size: size, font: fnt, color: color });
@@ -1012,7 +1028,7 @@ async function renderContractPdf(doc, opts) {
     }
   }
   if (doc.title) {
-    var t = String(doc.title).toUpperCase();
+    var t = wa(doc.title).toUpperCase();
     var ts = 17;
     while (ts > 11 && bold.widthOfTextAtSize(t, ts) > CW) ts -= 0.5;
     need(34);
@@ -1029,12 +1045,12 @@ async function renderContractPdf(doc, opts) {
     if (kind === "heading") {
       y -= 9;
       need(20);
-      page.drawText(String(sec.text || "").toUpperCase(), { x: M, y: y - 10.5, size: 10.5, font: bold, color: ink });
+      page.drawText(wa(sec.text).toUpperCase(), { x: M, y: y - 10.5, size: 10.5, font: bold, color: ink });
       y -= 20;
     } else if (kind === "paragraph") {
       if (sec.text) { drawWrapped(sec.text, font, 9.5, ink, 13); y -= 6; }
     } else if (kind === "field") {
-      var label = String(sec.label || "Field");
+      var label = wa(sec.label || "Field");
       var fid = sec.field_id || "other";
       var val = (mode === "filled") ? valueFor(fid) : "";
       if (sec.multiline) {
@@ -1056,7 +1072,7 @@ async function renderContractPdf(doc, opts) {
           page.drawLine({ start: { x: M + lw, y: y - 11 }, end: { x: W - M, y: y - 11 }, thickness: 1, color: ink });
           page.drawText("[date|req|signer1]", { x: M + lw + 2, y: y - 9, size: 7, font: font, color: white });
         } else if (val) {
-          page.drawText(String(val), { x: M + lw, y: y - 9.5, size: 9.5, font: font, color: ink });
+          page.drawText(wa(val), { x: M + lw, y: y - 9.5, size: 9.5, font: font, color: ink });
         } else {
           page.drawLine({ start: { x: M + lw, y: y - 11 }, end: { x: W - M, y: y - 11 }, thickness: 0.7, color: line });
         }
