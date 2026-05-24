@@ -753,7 +753,7 @@ app.post("/contracts/detect-fields", requireAuth, async (req, res) => {
   }
 });
 
-const REBUILD_PROMPT = `You are given a roofing or home improvement contract document. Transcribe the ENTIRE contract exactly, word for word. Do not summarize, reword, shorten, paraphrase, or omit anything. Every clause, sentence, term, number, percentage, dollar amount, license number, warranty, and notice must be reproduced exactly as written. Your only job is to identify the structure of the document so it can be re-typeset cleanly. Return ONLY a JSON object and nothing else, in this exact shape: {"title":"the contract title","sections":[ ]}. Each item in sections must be one of these four forms: {"kind":"heading","text":"a section heading exactly as written"} or {"kind":"paragraph","text":"a clause or paragraph transcribed word for word"} or {"kind":"field","label":"the printed label of a fill-in blank","field_id":"an id from the list","multiline":false} or {"kind":"signature"}. For every blank line, underline, or labeled fill-in space in the contract, emit a field section. Choose field_id from this list: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, date_signed, other. Set multiline to true only for large write-in areas such as the scope or description of work. Represent the customer signing area as a single signature section. Keep every section in the original reading order and transcribe the document completely from start to finish.`;
+const REBUILD_PROMPT = `You are given a roofing, home improvement, or public adjuster contract document. Transcribe the ENTIRE contract exactly, word for word. Do not summarize, reword, shorten, paraphrase, or omit anything. Every clause, sentence, term, number, percentage, dollar amount, license number, warranty, and notice must be reproduced exactly as written. Identify the structure of the document and estimate the font size of each part so the original sizing is preserved exactly. Return ONLY a JSON object and nothing else, in this exact shape: {"title":"the contract title","title_size":16,"sections":[ ]}. title_size is the point size of the title. Each item in sections must be one of these four forms: {"kind":"heading","text":"a heading exactly as written","size":12} or {"kind":"paragraph","text":"a clause or paragraph transcribed word for word","size":10} or {"kind":"field","label":"the printed label of a fill-in blank","field_id":"an id from the list","multiline":false,"size":10} or {"kind":"signature","label":"the party who signs here, for example Insured or Public Adjuster"}. The size value is your best estimate of the printed font size in points. Typical contract body text is 9 to 12 points. Most body paragraphs share one consistent size, so use the same size for them; only report a different size when the original clearly prints that text larger or smaller. Pay very close attention to any text printed larger or smaller than the body, such as a required legal notice, disclosure, or cancellation notice, and estimate its size accurately, because that exact size must be preserved for legal compliance. For every blank line, underline, or labeled fill-in space, emit a field section. Choose field_id from this list: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, date_signed, other. Set multiline to true only for large write-in areas such as the scope or description of work. Represent each signing area as a single signature section. Keep every section in the original reading order and transcribe the document completely from start to finish.`;
 
 app.post("/contracts/rebuild", requireAuth, async (req, res) => {
   try {
@@ -990,6 +990,7 @@ async function renderContractPdf(doc, opts) {
   var y = H - M;
   function newPage() { page = pdf.addPage([W, H]); y = H - M; }
   function need(hh) { if (y - hh < M + 14) newPage(); }
+  function clampSize(v, def) { var n = Number(v); if (!n || n < 6 || n > 30) return def; return n; }
   function todayStr() { return new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }); }
   function wa(v) {
     var s = String(v == null ? "" : v);
@@ -1019,7 +1020,8 @@ async function renderContractPdf(doc, opts) {
     if (id === "agreement_date") return todayStr();
     return "";
   }
-  function drawWrapped(text, fnt, size, color, lh) {
+  function drawWrapped(text, fnt, size, color) {
+    var lh = size * 1.34;
     var ls = apWrap(wa(text), fnt, size, CW);
     for (var i = 0; i < ls.length; i++) {
       need(lh);
@@ -1029,13 +1031,13 @@ async function renderContractPdf(doc, opts) {
   }
   if (doc.title) {
     var t = wa(doc.title).toUpperCase();
-    var ts = 17;
-    while (ts > 11 && bold.widthOfTextAtSize(t, ts) > CW) ts -= 0.5;
-    need(34);
+    var ts = clampSize(doc.title_size, 17);
+    while (ts > 10 && bold.widthOfTextAtSize(t, ts) > CW) ts -= 0.5;
+    need(ts + 18);
     page.drawText(t, { x: M + (CW - bold.widthOfTextAtSize(t, ts)) / 2, y: y - ts, size: ts, font: bold, color: ink });
     y -= ts + 9;
     page.drawLine({ start: { x: M, y: y }, end: { x: W - M, y: y }, thickness: 1.4, color: accent });
-    y -= 22;
+    y -= 20;
   }
   var sawSig = false;
   var sections = Array.isArray(doc.sections) ? doc.sections : [];
@@ -1043,44 +1045,48 @@ async function renderContractPdf(doc, opts) {
     var sec = sections[s] || {};
     var kind = sec.kind || "paragraph";
     if (kind === "heading") {
-      y -= 9;
-      need(20);
-      page.drawText(wa(sec.text).toUpperCase(), { x: M, y: y - 10.5, size: 10.5, font: bold, color: ink });
-      y -= 20;
+      var hs = clampSize(sec.size, 11);
+      y -= hs * 0.7;
+      need(hs * 1.6);
+      page.drawText(wa(sec.text).toUpperCase(), { x: M, y: y - hs, size: hs, font: bold, color: ink });
+      y -= hs * 1.5;
     } else if (kind === "paragraph") {
-      if (sec.text) { drawWrapped(sec.text, font, 9.5, ink, 13); y -= 6; }
+      if (sec.text) { var ps = clampSize(sec.size, 10.5); drawWrapped(sec.text, font, ps, ink); y -= ps * 0.5; }
     } else if (kind === "field") {
       var label = wa(sec.label || "Field");
       var fid = sec.field_id || "other";
+      var fs = clampSize(sec.size, 10.5);
       var val = (mode === "filled") ? valueFor(fid) : "";
       if (sec.multiline) {
-        need(22);
-        page.drawText(label + ":", { x: M, y: y - 9.5, size: 9.5, font: bold, color: ink });
-        y -= 15;
-        if (val) { drawWrapped(val, font, 9.5, ink, 13); y -= 6; }
-        else { for (var k = 0; k < 3; k++) { need(16); page.drawLine({ start: { x: M, y: y - 2 }, end: { x: W - M, y: y - 2 }, thickness: 0.7, color: line }); y -= 16; } y -= 3; }
+        need(fs * 6);
+        page.drawText(label + ":", { x: M, y: y - fs, size: fs, font: bold, color: ink });
+        y -= fs * 1.6;
+        if (val) { drawWrapped(val, font, fs, ink); y -= fs * 0.5; }
+        else { for (var k = 0; k < 3; k++) { need(fs * 1.8); page.drawLine({ start: { x: M, y: y - 2 }, end: { x: W - M, y: y - 2 }, thickness: 0.7, color: line }); y -= fs * 1.8; } y -= 3; }
       } else {
-        need(22);
+        need(fs * 2.3);
         var lab = label + ":  ";
-        var lw = bold.widthOfTextAtSize(lab, 9.5);
-        page.drawText(lab, { x: M, y: y - 9.5, size: 9.5, font: bold, color: ink });
+        var lw = bold.widthOfTextAtSize(lab, fs);
+        page.drawText(lab, { x: M, y: y - fs, size: fs, font: bold, color: ink });
+        var underY = y - fs - 1.5;
         if (mode === "filled" && fid === "signature") {
-          page.drawLine({ start: { x: M + lw, y: y - 11 }, end: { x: W - M, y: y - 11 }, thickness: 1, color: ink });
-          page.drawText("[sig|req|signer1]", { x: M + lw + 2, y: y - 9, size: 7, font: font, color: white });
+          page.drawLine({ start: { x: M + lw, y: underY }, end: { x: W - M, y: underY }, thickness: 1, color: ink });
+          page.drawText("[sig|req|signer1]", { x: M + lw + 2, y: underY + 2, size: 7, font: font, color: white });
           sawSig = true;
         } else if (mode === "filled" && fid === "date_signed") {
-          page.drawLine({ start: { x: M + lw, y: y - 11 }, end: { x: W - M, y: y - 11 }, thickness: 1, color: ink });
-          page.drawText("[date|req|signer1]", { x: M + lw + 2, y: y - 9, size: 7, font: font, color: white });
+          page.drawLine({ start: { x: M + lw, y: underY }, end: { x: W - M, y: underY }, thickness: 1, color: ink });
+          page.drawText("[date|req|signer1]", { x: M + lw + 2, y: underY + 2, size: 7, font: font, color: white });
         } else if (val) {
-          page.drawText(wa(val), { x: M + lw, y: y - 9.5, size: 9.5, font: font, color: ink });
+          page.drawText(wa(val), { x: M + lw, y: y - fs, size: fs, font: font, color: ink });
         } else {
-          page.drawLine({ start: { x: M + lw, y: y - 11 }, end: { x: W - M, y: y - 11 }, thickness: 0.7, color: line });
+          page.drawLine({ start: { x: M + lw, y: underY }, end: { x: W - M, y: underY }, thickness: 0.7, color: line });
         }
-        y -= 21;
+        y -= fs * 2.3;
       }
     } else if (kind === "signature") {
-      y -= 20;
-      need(58);
+      var slabel = wa(sec.label || "Signature");
+      y -= 22;
+      need(60);
       var colW = (CW - 34) / 2;
       page.drawLine({ start: { x: M, y: y }, end: { x: M + colW, y: y }, thickness: 1, color: ink });
       page.drawLine({ start: { x: M + colW + 34, y: y }, end: { x: W - M, y: y }, thickness: 1, color: ink });
@@ -1090,13 +1096,13 @@ async function renderContractPdf(doc, opts) {
         sawSig = true;
       }
       y -= 13;
-      page.drawText("Client Signature", { x: M, y: y, size: 8.5, font: font, color: soft });
-      page.drawText("Date Signed", { x: M + colW + 34, y: y, size: 8.5, font: font, color: soft });
+      page.drawText(slabel, { x: M, y: y, size: 8.5, font: font, color: soft });
+      page.drawText("Date", { x: M + colW + 34, y: y, size: 8.5, font: font, color: soft });
       y -= 20;
     }
   }
   if (mode === "filled" && !sawSig) {
-    need(58);
+    need(60);
     y -= 16;
     var cw2 = (CW - 34) / 2;
     page.drawLine({ start: { x: M, y: y }, end: { x: M + cw2, y: y }, thickness: 1, color: ink });
