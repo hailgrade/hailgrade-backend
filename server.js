@@ -805,14 +805,31 @@ async function buildAgreementPdf(contractBytes, body, user) {
 
 /* ===================== ROOF MEASUREMENT (Google Solar API) ===================== */
 async function geocodeUS(address) {
+  if (!address || !String(address).trim()) return null;
+  const q = String(address).trim();
+  // Step 1: US Census geocoder - free, no key
   try {
-    const u = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?address=" +
-      encodeURIComponent(address) + "&benchmark=2020&format=json";
-    const r = await fetch(u);
-    const j = await r.json().catch(() => ({}));
-    const m = j && j.result && j.result.addressMatches && j.result.addressMatches[0];
-    if (m && m.coordinates) return { lat: Number(m.coordinates.y), lng: Number(m.coordinates.x) };
-  } catch (e) { console.error("[geocodeUS]", e); }
+    const cu = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?address=" + encodeURIComponent(q) + "&benchmark=2020&format=json";
+    const cr = await fetch(cu);
+    if (cr.ok) {
+      const cj = await cr.json();
+      const m = cj && cj.result && cj.result.addressMatches && cj.result.addressMatches[0];
+      if (m && m.coordinates && m.coordinates.y && m.coordinates.x) {
+        return { lat: Number(m.coordinates.y), lng: Number(m.coordinates.x), source: "census" };
+      }
+    }
+  } catch (e) {}
+  // Step 2: OpenStreetMap Nominatim fallback - free, no key
+  try {
+    const nu = "https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=" + encodeURIComponent(q);
+    const nr = await fetch(nu, { headers: { "User-Agent": "HailGrade/1.0 claims@smithadjusters.com" } });
+    if (nr.ok) {
+      const nj = await nr.json();
+      if (Array.isArray(nj) && nj[0] && nj[0].lat && nj[0].lon) {
+        return { lat: Number(nj[0].lat), lng: Number(nj[0].lon), source: "nominatim" };
+      }
+    }
+  } catch (e) {}
   return null;
 }
 
