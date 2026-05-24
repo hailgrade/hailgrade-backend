@@ -612,9 +612,26 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     try { docJson = tpl[0].doc_json ? JSON.parse(tpl[0].doc_json) : null; } catch (e) { docJson = null; }
     let fieldMap = [];
     try { fieldMap = tpl[0].field_map ? JSON.parse(tpl[0].field_map) : []; } catch (e) { fieldMap = []; }
+    let _hasClient2 = false, _needsAdjuster = false;
+    try {
+      (docJson && Array.isArray(docJson.sections) ? docJson.sections : []).forEach(function (sx) {
+        if (!sx) return;
+        var _isS = sx.kind === "signature" || (sx.kind === "field" && (sx.field_id === "signature" || sx.field_id === "initials" || sx.field_id === "date_signed"));
+        if (!_isS) return;
+        if (sx.signer === "client2") _hasClient2 = true;
+        if (sx.signer === "adjuster") _needsAdjuster = true;
+      });
+    } catch (e) {}
+    var _signer2Name = String(body.signer2_name || "").trim();
+    var _signer2Email = String(body.signer2_email || "").trim();
+    var _useClient2 = _hasClient2 && !!_signer2Email;
+    var signerMap = { client: "signer1", client2: "signer1", adjuster: "signer1" };
+    var _mpos = 1;
+    if (_useClient2) { signerMap.client2 = "signer" + (_mpos + 1); _mpos++; }
+    if (_needsAdjuster) { signerMap.adjuster = "signer" + (_mpos + 1); _mpos++; }
     let mergedBuf;
     try {
-      if (docJson && Array.isArray(docJson.sections) && docJson.sections.length) { mergedBuf = await renderContractPdf(docJson, { mode: "filled", body: body, user: req.user }); }
+      if (docJson && Array.isArray(docJson.sections) && docJson.sections.length) { mergedBuf = await renderContractPdf(docJson, { mode: "filled", body: body, user: req.user, signer_map: signerMap }); }
       else if (Array.isArray(fieldMap) && fieldMap.length) { mergedBuf = await fillContractPdf(pdfBuf, fieldMap, body, req.user); }
       else { mergedBuf = await buildAgreementPdf(pdfBuf, body, req.user); }
     }
@@ -627,12 +644,18 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     form.append("signers[0][name]", signerName);
     form.append("signers[0][email_address]", signerEmail);
     form.append("signers[0][order]", "0");
-    let needsAdjuster = false;
-    try { (docJson && Array.isArray(docJson.sections) ? docJson.sections : []).forEach(function (sx) { if (sx && sx.signer === "adjuster" && (sx.kind === "signature" || (sx.kind === "field" && (sx.field_id === "signature" || sx.field_id === "initials" || sx.field_id === "date_signed")))) needsAdjuster = true; }); } catch (e) {}
-    if (needsAdjuster) {
-      form.append("signers[1][name]", req.user.full_name || req.user.firm_name || "Public Adjuster");
-      form.append("signers[1][email_address]", req.user.email);
-      form.append("signers[1][order]", "1");
+    let _sp = 1;
+    if (_useClient2) {
+      form.append("signers[" + _sp + "][name]", _signer2Name || "Second Signer");
+      form.append("signers[" + _sp + "][email_address]", _signer2Email);
+      form.append("signers[" + _sp + "][order]", String(_sp));
+      _sp++;
+    }
+    if (_needsAdjuster) {
+      form.append("signers[" + _sp + "][name]", req.user.full_name || req.user.firm_name || "Public Adjuster");
+      form.append("signers[" + _sp + "][email_address]", req.user.email);
+      form.append("signers[" + _sp + "][order]", String(_sp));
+      _sp++;
     } else {
       form.append("cc_email_addresses[0]", req.user.email);
     }
@@ -761,7 +784,7 @@ app.post("/contracts/detect-fields", requireAuth, async (req, res) => {
   }
 });
 
-const REBUILD_PROMPT = `You are given a roofing, home improvement, or public adjuster contract document. Transcribe the ENTIRE contract exactly, word for word. Do not summarize, reword, shorten, paraphrase, or omit anything. Every clause, sentence, term, number, percentage, dollar amount, license number, warranty, and notice must be reproduced exactly as written. Identify the structure of the document and estimate the font size of each part so the original sizing is preserved exactly. Return ONLY a JSON object and nothing else, in this exact shape: {"title":"the contract title","title_size":16,"sections":[ ]}. title_size is the point size of the title. Each item in sections must be one of these four forms: {"kind":"heading","text":"a heading exactly as written","size":12} or {"kind":"paragraph","text":"a clause or paragraph transcribed word for word","size":10} or {"kind":"field","label":"the printed label of a fill-in blank","field_id":"an id from the list","multiline":false,"size":10,"signer":"client or adjuster"} or {"kind":"signature","label":"the party who signs here","signer":"client or adjuster"}. The size value is your best estimate of the printed font size in points. Typical contract body text is 9 to 12 points. Most body paragraphs share one consistent size, so use the same size for them; only report a different size when the original clearly prints that text larger or smaller. Pay very close attention to any text printed larger or smaller than the body, such as a required legal notice, disclosure, or cancellation notice, and estimate its size accurately, because that exact size must be preserved for legal compliance. For every blank line, underline, or labeled fill-in space, emit a field section. Choose field_id from this list: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, date_signed, initials, other. Use initials for any spot where the client puts their initials rather than a full signature, such as initialing a page or initialing next to a specific clause. Set multiline to true only for large write-in areas such as the scope or description of work. Represent each signing area as a single signature section. For every signature, initials, and date_signed spot, also set a signer property to "client" if that spot is completed by the customer, insured, homeowner, or property owner, or to "adjuster" if it is completed by the public adjuster, adjuster, contractor, roofer, company, or firm representative; when you cannot tell, use "client". Keep every section in the original reading order and transcribe the document completely from start to finish.`;
+const REBUILD_PROMPT = `You are given a roofing, home improvement, or public adjuster contract document. Transcribe the ENTIRE contract exactly, word for word. Do not summarize, reword, shorten, paraphrase, or omit anything. Every clause, sentence, term, number, percentage, dollar amount, license number, warranty, and notice must be reproduced exactly as written. Identify the structure of the document and estimate the font size of each part so the original sizing is preserved exactly. Return ONLY a JSON object and nothing else, in this exact shape: {"title":"the contract title","title_size":16,"sections":[ ]}. title_size is the point size of the title. Each item in sections must be one of these four forms: {"kind":"heading","text":"a heading exactly as written","size":12} or {"kind":"paragraph","text":"a clause or paragraph transcribed word for word","size":10} or {"kind":"field","label":"the printed label of a fill-in blank","field_id":"an id from the list","multiline":false,"size":10,"signer":"client, client2, or adjuster"} or {"kind":"signature","label":"the party who signs here","signer":"client, client2, or adjuster"}. The size value is your best estimate of the printed font size in points. Typical contract body text is 9 to 12 points. Most body paragraphs share one consistent size, so use the same size for them; only report a different size when the original clearly prints that text larger or smaller. Pay very close attention to any text printed larger or smaller than the body, such as a required legal notice, disclosure, or cancellation notice, and estimate its size accurately, because that exact size must be preserved for legal compliance. For every blank line, underline, or labeled fill-in space, emit a field section. Choose field_id from this list: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, date_signed, initials, other. Use initials for any spot where the client puts their initials rather than a full signature, such as initialing a page or initialing next to a specific clause. Set multiline to true only for large write-in areas such as the scope or description of work. Represent each signing area as a single signature section. For every signature, initials, and date_signed spot, also set a signer property: use "client" for the primary customer, insured, homeowner, or property owner; use "client2" for a second, different insured or co-owner who has their own separate signature line, such as a co-insured or a spouse or a second property owner; use "adjuster" for the public adjuster, adjuster, contractor, roofer, company, or firm representative. When the document has two separate signature lines on the customer side, use "client" for the first and "client2" for the second. When you cannot tell, use "client". Keep every section in the original reading order and transcribe the document completely from start to finish.`;
 
 app.post("/contracts/rebuild", requireAuth, async (req, res) => {
   try {
@@ -985,6 +1008,7 @@ async function renderContractPdf(doc, opts) {
   var mode = opts.mode || "blank";
   var body = opts.body || {};
   var fieldValues = Array.isArray(body.field_values) ? body.field_values : null;
+  var signerMap = opts.signer_map || null;
   var pdf = await PDFDocument.create();
   var font = await pdf.embedFont(StandardFonts.Helvetica);
   var bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -1000,7 +1024,7 @@ async function renderContractPdf(doc, opts) {
   function newPage() { page = pdf.addPage([W, H]); y = H - M; }
   function need(hh) { if (y - hh < M + 14) newPage(); }
   function clampSize(v, def) { var n = Number(v); if (!n || n < 6 || n > 30) return def; return n; }
-  function sgnr(x) { return (x && x.signer === "adjuster") ? "signer2" : "signer1"; }
+  function sgnr(x) { var role = (x && x.signer) || "client"; return (signerMap && signerMap[role]) || "signer1"; }
   function todayStr() { return new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }); }
   function wa(v) {
     var s = String(v == null ? "" : v);
