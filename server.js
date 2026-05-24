@@ -753,26 +753,24 @@ app.post("/contracts/detect-fields", requireAuth, async (req, res) => {
   }
 });
 
-const REBUILD_PROMPT = `You are given page images of a roofing or home improvement contract. Transcribe the ENTIRE contract exactly, word for word. Do not summarize, reword, shorten, paraphrase, or omit anything. Every clause, sentence, term, number, percentage, dollar amount, license number, warranty, and notice must be reproduced exactly as written. Your only job is to identify the structure of the document so it can be re-typeset cleanly. Return ONLY a JSON object and nothing else, in this exact shape: {"title":"the contract title","sections":[ ]}. Each item in sections must be one of these four forms: {"kind":"heading","text":"a section heading exactly as written"} or {"kind":"paragraph","text":"a clause or paragraph transcribed word for word"} or {"kind":"field","label":"the printed label of a fill-in blank","field_id":"an id from the list","multiline":false} or {"kind":"signature"}. For every blank line, underline, or labeled fill-in space in the contract, emit a field section. Choose field_id from this list: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, date_signed, other. Set multiline to true only for large write-in areas such as the scope or description of work. Represent the customer signing area as a single signature section. Keep every section in the original reading order and transcribe the document completely from start to finish.`;
+const REBUILD_PROMPT = `You are given a roofing or home improvement contract document. Transcribe the ENTIRE contract exactly, word for word. Do not summarize, reword, shorten, paraphrase, or omit anything. Every clause, sentence, term, number, percentage, dollar amount, license number, warranty, and notice must be reproduced exactly as written. Your only job is to identify the structure of the document so it can be re-typeset cleanly. Return ONLY a JSON object and nothing else, in this exact shape: {"title":"the contract title","sections":[ ]}. Each item in sections must be one of these four forms: {"kind":"heading","text":"a section heading exactly as written"} or {"kind":"paragraph","text":"a clause or paragraph transcribed word for word"} or {"kind":"field","label":"the printed label of a fill-in blank","field_id":"an id from the list","multiline":false} or {"kind":"signature"}. For every blank line, underline, or labeled fill-in space in the contract, emit a field section. Choose field_id from this list: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, date_signed, other. Set multiline to true only for large write-in areas such as the scope or description of work. Represent the customer signing area as a single signature section. Keep every section in the original reading order and transcribe the document completely from start to finish.`;
 
 app.post("/contracts/rebuild", requireAuth, async (req, res) => {
   try {
     await ensureContractsSchema();
-    const pages = (req.body && req.body.pages) || [];
-    if (!Array.isArray(pages) || !pages.length) return res.status(400).json({ error: "No contract pages were provided" });
     if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: "AI is not configured" });
-    const content = [];
-    for (let i = 0; i < pages.length && i < 10; i++) {
-      let raw = String(pages[i] || "");
-      const comma = raw.indexOf(",");
-      if (raw.slice(0, 5) === "data:" && comma >= 0) raw = raw.slice(comma + 1);
-      content.push({ type: "text", text: "PAGE " + (i + 1) + ":" });
-      content.push({ type: "image", source: { type: "base64", media_type: "image/png", data: raw } });
-    }
-    content.push({ type: "text", text: REBUILD_PROMPT });
+    const tpl = dsRowsOf(await q("SELECT pdf_base64 FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    if (!tpl.length || !tpl[0].pdf_base64) return res.status(400).json({ error: "Upload your contract first" });
+    let pdfB64 = String(tpl[0].pdf_base64 || "");
+    const cidx = pdfB64.indexOf(",");
+    if (pdfB64.slice(0, 5) === "data:" && cidx >= 0) pdfB64 = pdfB64.slice(cidx + 1);
+    const content = [
+      { type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfB64 } },
+      { type: "text", text: REBUILD_PROMPT }
+    ];
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "anthropic-beta": "pdfs-2024-09-25" },
       body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 8000, messages: [{ role: "user", content: content }] })
     });
     const data = await response.json();
