@@ -561,6 +561,7 @@ async function ensureContractsSchema() {
   await q("CREATE TABLE IF NOT EXISTS user_contracts (user_id INTEGER PRIMARY KEY, filename TEXT, pdf_base64 TEXT, uploaded_at TIMESTAMPTZ DEFAULT now())");
   await q("CREATE TABLE IF NOT EXISTS contracts (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, claim_local_id TEXT, claim_name TEXT, signer_name TEXT, signer_email TEXT, signature_request_id TEXT, status TEXT DEFAULT 'sent', signed_pdf_url TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now())");
   try { await q("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS price TEXT"); } catch (e) {}
+  try { await q("ALTER TABLE user_contracts ADD COLUMN IF NOT EXISTS field_map TEXT"); } catch (e) {}
   _contractsSchemaReady = true;
 }
 function dsAuthHeader() {
@@ -603,11 +604,16 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     const signerName = (body.signer_name || "").trim();
     const signerEmail = (body.signer_email || "").trim();
     if (!signerName || !signerEmail) return res.status(400).json({ error: "Client name and email are required" });
-    const tpl = dsRowsOf(await q("SELECT filename, pdf_base64 FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    const tpl = dsRowsOf(await q("SELECT filename, pdf_base64, field_map FROM user_contracts WHERE user_id=$1", [req.user.id]));
     if (!tpl.length) return res.status(400).json({ error: "Upload your contract first" });
     const pdfBuf = Buffer.from(tpl[0].pdf_base64, "base64");
+    let fieldMap = [];
+    try { fieldMap = tpl[0].field_map ? JSON.parse(tpl[0].field_map) : []; } catch (e) { fieldMap = []; }
     let mergedBuf;
-    try { mergedBuf = await buildAgreementPdf(pdfBuf, body, req.user); }
+    try {
+      if (Array.isArray(fieldMap) && fieldMap.length) { mergedBuf = await fillContractPdf(pdfBuf, fieldMap, body, req.user); }
+      else { mergedBuf = await buildAgreementPdf(pdfBuf, body, req.user); }
+    }
     catch (e) { console.error("[contracts/send] merge", e); return res.status(500).json({ error: "Could not build the agreement PDF. Try re-uploading your contract." }); }
     const form = new FormData();
     const claimName = body.claim_name || "";
@@ -682,12 +688,63 @@ app.get("/contracts/status/:id", requireAuth, async (req, res) => {
 app.get("/contracts/template/file", requireAuth, async (req, res) => {
   try {
     await ensureContractsSchema();
-    const rows = dsRowsOf(await q("SELECT filename, pdf_base64, uploaded_at FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    const rows = dsRowsOf(await q("SELECT filename, pdf_base64, uploaded_at, field_map FROM user_contracts WHERE user_id=$1", [req.user.id]));
     if (!rows.length) return res.status(404).json({ error: "No contract on file" });
-    res.json({ filename: rows[0].filename, pdf_base64: rows[0].pdf_base64, uploaded_at: rows[0].uploaded_at });
+    let _fm = null; try { _fm = rows[0].field_map ? JSON.parse(rows[0].field_map) : null; } catch (e) { _fm = null; }
+    res.json({ filename: rows[0].filename, pdf_base64: rows[0].pdf_base64, uploaded_at: rows[0].uploaded_at, field_map: _fm });
   } catch (e) {
     console.error("[contracts/template/file]", e);
     res.status(500).json({ error: "Could not load contract file" });
+  }
+});
+
+app.post("/contracts/template/fieldmap", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    const fm = (req.body && req.body.field_map) || [];
+    if (!Array.isArray(fm)) return res.status(400).json({ error: "field_map must be an array" });
+    await q("UPDATE user_contracts SET field_map=$1 WHERE user_id=$2", [JSON.stringify(fm), req.user.id]);
+    res.json({ ok: true, count: fm.length });
+  } catch (e) {
+    console.error("[contracts/fieldmap:save]", e);
+    res.status(500).json({ error: "Could not save the field layout" });
+  }
+});
+
+const DETECT_FIELDS_PROMPT = `You are looking at page images of a roofing contract. Find every BLANK FILL-IN FIELD that a person would write into: an empty underline, a blank space after a printed label, or an empty box. For each blank, give its position as a fraction of the page from 0 to 1, where x and y are the TOP-LEFT corner measured from the top-left of the page, and w and h are the width and height of the blank. Classify each blank as one of these types by reading the printed label next to it: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, signature, date_signed, other. Use signature for where the customer signs their name. Use date_signed for the date blank right beside that customer signature. Use agreement_date for a contract date or agreement date near the top of the document. Use price for any contract price, total, amount, or dollar figure blank. Be precise with coordinates so the box sits directly on the blank. Return ONLY a JSON array and nothing else, in exactly this shape: [{"type":"client_name","page":1,"x":0.35,"y":0.21,"w":0.4,"h":0.03}]. The page value is 1-based. If you find no blanks, return [].`;
+
+app.post("/contracts/detect-fields", requireAuth, async (req, res) => {
+  try {
+    const pages = (req.body && req.body.pages) || [];
+    if (!Array.isArray(pages) || !pages.length) return res.status(400).json({ error: "No contract pages were provided" });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: "AI is not configured" });
+    const content = [];
+    for (let i = 0; i < pages.length && i < 8; i++) {
+      let raw = String(pages[i] || "");
+      const comma = raw.indexOf(",");
+      if (raw.slice(0, 5) === "data:" && comma >= 0) raw = raw.slice(comma + 1);
+      content.push({ type: "text", text: "PAGE " + (i + 1) + ":" });
+      content.push({ type: "image", source: { type: "base64", media_type: "image/png", data: raw } });
+    }
+    content.push({ type: "text", text: DETECT_FIELDS_PROMPT });
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 2000, messages: [{ role: "user", content: content }] })
+    });
+    const data = await response.json();
+    if (!response.ok) { console.error("[detect-fields] anthropic", response.status, data); return res.status(502).json({ error: "The AI could not read the contract" }); }
+    let text = (data.content || []).filter(c => c.type === "text").map(c => c.text).join("").trim();
+    const lb = text.indexOf("[");
+    const rb = text.lastIndexOf("]");
+    if (lb >= 0 && rb > lb) text = text.slice(lb, rb + 1);
+    let parsed = [];
+    try { parsed = JSON.parse(text); } catch (e) { console.error("[detect-fields] parse failed"); return res.json({ fields: [] }); }
+    const fields = Array.isArray(parsed) ? parsed : (parsed.fields || []);
+    res.json({ fields: fields });
+  } catch (e) {
+    console.error("[contracts/detect-fields]", e);
+    res.status(500).json({ error: "Field detection failed" });
   }
 });
 
@@ -799,6 +856,63 @@ async function buildAgreementPdf(contractBytes, body, user) {
     throw new Error("contract-merge-failed");
   }
   return await merged.save();
+}
+
+async function fillContractPdf(contractBytes, fieldMap, body, user) {
+  body = body || {};
+  const pdf = await PDFDocument.load(contractBytes, { ignoreEncryption: true });
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const pages = pdf.getPages();
+  const ink = rgb(0.1, 0.1, 0.13);
+  const white = rgb(1, 1, 1);
+  const today = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+  function valueFor(type) {
+    if (type === "client_name") return body.signer_name || body.claim_name || "";
+    if (type === "property_address") return body.property_address || body.address || "";
+    if (type === "phone") return body.phone || "";
+    if (type === "email") return body.signer_email || "";
+    if (type === "carrier") return body.carrier || body.insurance_carrier || "";
+    if (type === "claim_number") return body.claim_number || body.claim_no || "";
+    if (type === "price") { var p = body.price ? String(body.price).trim() : ""; return p ? (p.charAt(0) === "$" ? p : "$" + p) : ""; }
+    if (type === "scope") return body.scope || "";
+    if (type === "agreement_date") return today;
+    return "";
+  }
+  let sigCount = 0;
+  const list = Array.isArray(fieldMap) ? fieldMap : [];
+  for (let i = 0; i < list.length; i++) {
+    const f = list[i] || {};
+    const pageIdx = (f.page || 1) - 1;
+    if (pageIdx < 0 || pageIdx >= pages.length) continue;
+    const pg = pages[pageIdx];
+    const sz = pg.getSize();
+    const pw = sz.width, ph = sz.height;
+    const x = (Number(f.x) || 0) * pw;
+    const fh = (Number(f.h) || 0.025) * ph;
+    const fw = Math.max(36, (Number(f.w) || 0.3) * pw);
+    const yTop = (Number(f.y) || 0) * ph;
+    const baseline = ph - yTop - fh * 0.78;
+    if (f.type === "signature") {
+      sigCount++;
+      pg.drawText("[sig|req|signer1]", { x: x + 2, y: baseline, size: 7, font: font, color: white });
+    } else if (f.type === "date_signed") {
+      pg.drawText("[date|req|signer1]", { x: x + 2, y: baseline, size: 7, font: font, color: white });
+    } else {
+      const val = valueFor(f.type);
+      if (val) {
+        let size = 11;
+        while (size > 6 && font.widthOfTextAtSize(String(val), size) > fw) size -= 0.5;
+        pg.drawText(String(val), { x: x + 2, y: baseline, size: size, font: font, color: ink });
+      }
+    }
+  }
+  if (sigCount === 0) {
+    const last = pages[pages.length - 1];
+    const ls = last.getSize();
+    last.drawText("[sig|req|signer1]", { x: 60, y: 70, size: 7, font: font, color: white });
+    last.drawText("[date|req|signer1]", { x: ls.width - 180, y: 70, size: 7, font: font, color: white });
+  }
+  return await pdf.save();
 }
 /* =================== END AGREEMENT SUMMARY PAGE =================== */
 
