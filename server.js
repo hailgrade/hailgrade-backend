@@ -976,6 +976,7 @@ async function renderContractPdf(doc, opts) {
   opts = opts || {};
   var mode = opts.mode || "blank";
   var body = opts.body || {};
+  var fieldValues = Array.isArray(body.field_values) ? body.field_values : null;
   var pdf = await PDFDocument.create();
   var font = await pdf.embedFont(StandardFonts.Helvetica);
   var bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -1040,6 +1041,7 @@ async function renderContractPdf(doc, opts) {
     y -= 20;
   }
   var sawSig = false;
+  var fieldIdx = 0;
   var sections = Array.isArray(doc.sections) ? doc.sections : [];
   for (var s = 0; s < sections.length; s++) {
     var sec = sections[s] || {};
@@ -1056,7 +1058,9 @@ async function renderContractPdf(doc, opts) {
       var label = wa(sec.label || "Field");
       var fid = sec.field_id || "other";
       var fs = clampSize(sec.size, 10.5);
-      var val = (mode === "filled") ? valueFor(fid) : "";
+      var fno = fieldIdx; fieldIdx++;
+      var ov = (mode === "filled" && fieldValues && fieldValues[fno] != null && String(fieldValues[fno]).trim() !== "") ? String(fieldValues[fno]) : "";
+      var val = (mode === "filled") ? (ov || valueFor(fid)) : "";
       if (sec.multiline) {
         need(fs * 6);
         page.drawText(label + ":", { x: M, y: y - fs, size: fs, font: bold, color: ink });
