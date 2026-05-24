@@ -562,6 +562,7 @@ async function ensureContractsSchema() {
   await q("CREATE TABLE IF NOT EXISTS contracts (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, claim_local_id TEXT, claim_name TEXT, signer_name TEXT, signer_email TEXT, signature_request_id TEXT, status TEXT DEFAULT 'sent', signed_pdf_url TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now())");
   try { await q("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS price TEXT"); } catch (e) {}
   try { await q("ALTER TABLE user_contracts ADD COLUMN IF NOT EXISTS field_map TEXT"); } catch (e) {}
+  try { await q("ALTER TABLE user_contracts ADD COLUMN IF NOT EXISTS doc_json TEXT"); } catch (e) {}
   _contractsSchemaReady = true;
 }
 function dsAuthHeader() {
@@ -576,7 +577,7 @@ app.post("/contracts/template", requireAuth, async (req, res) => {
     if (!body.pdf_base64) return res.status(400).json({ error: "Missing contract file" });
     const clean = String(body.pdf_base64).replace(/^data:[^,]*,/, "");
     const fn = body.filename || "contract.pdf";
-    await q("INSERT INTO user_contracts (user_id, filename, pdf_base64, uploaded_at) VALUES ($1,$2,$3, now()) ON CONFLICT (user_id) DO UPDATE SET filename=$2, pdf_base64=$3, uploaded_at=now(), field_map=NULL", [req.user.id, fn, clean]);
+    await q("INSERT INTO user_contracts (user_id, filename, pdf_base64, uploaded_at) VALUES ($1,$2,$3, now()) ON CONFLICT (user_id) DO UPDATE SET filename=$2, pdf_base64=$3, uploaded_at=now(), field_map=NULL, doc_json=NULL", [req.user.id, fn, clean]);
     res.json({ ok: true, filename: fn });
   } catch (e) {
     console.error("[contracts/template]", e);
@@ -604,14 +605,17 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     const signerName = (body.signer_name || "").trim();
     const signerEmail = (body.signer_email || "").trim();
     if (!signerName || !signerEmail) return res.status(400).json({ error: "Client name and email are required" });
-    const tpl = dsRowsOf(await q("SELECT filename, pdf_base64, field_map FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    const tpl = dsRowsOf(await q("SELECT filename, pdf_base64, field_map, doc_json FROM user_contracts WHERE user_id=$1", [req.user.id]));
     if (!tpl.length) return res.status(400).json({ error: "Upload your contract first" });
     const pdfBuf = Buffer.from(tpl[0].pdf_base64, "base64");
+    let docJson = null;
+    try { docJson = tpl[0].doc_json ? JSON.parse(tpl[0].doc_json) : null; } catch (e) { docJson = null; }
     let fieldMap = [];
     try { fieldMap = tpl[0].field_map ? JSON.parse(tpl[0].field_map) : []; } catch (e) { fieldMap = []; }
     let mergedBuf;
     try {
-      if (Array.isArray(fieldMap) && fieldMap.length) { mergedBuf = await fillContractPdf(pdfBuf, fieldMap, body, req.user); }
+      if (docJson && Array.isArray(docJson.sections) && docJson.sections.length) { mergedBuf = await renderContractPdf(docJson, { mode: "filled", body: body, user: req.user }); }
+      else if (Array.isArray(fieldMap) && fieldMap.length) { mergedBuf = await fillContractPdf(pdfBuf, fieldMap, body, req.user); }
       else { mergedBuf = await buildAgreementPdf(pdfBuf, body, req.user); }
     }
     catch (e) { console.error("[contracts/send] merge", e); return res.status(500).json({ error: "Could not build the agreement PDF. Try re-uploading your contract." }); }
@@ -688,10 +692,11 @@ app.get("/contracts/status/:id", requireAuth, async (req, res) => {
 app.get("/contracts/template/file", requireAuth, async (req, res) => {
   try {
     await ensureContractsSchema();
-    const rows = dsRowsOf(await q("SELECT filename, pdf_base64, uploaded_at, field_map FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    const rows = dsRowsOf(await q("SELECT filename, pdf_base64, uploaded_at, field_map, doc_json FROM user_contracts WHERE user_id=$1", [req.user.id]));
     if (!rows.length) return res.status(404).json({ error: "No contract on file" });
     let _fm = null; try { _fm = rows[0].field_map ? JSON.parse(rows[0].field_map) : null; } catch (e) { _fm = null; }
-    res.json({ filename: rows[0].filename, pdf_base64: rows[0].pdf_base64, uploaded_at: rows[0].uploaded_at, field_map: _fm });
+    let _doc = null; try { _doc = rows[0].doc_json ? JSON.parse(rows[0].doc_json) : null; } catch (e) { _doc = null; }
+    res.json({ filename: rows[0].filename, pdf_base64: rows[0].pdf_base64, uploaded_at: rows[0].uploaded_at, field_map: _fm, doc: _doc });
   } catch (e) {
     console.error("[contracts/template/file]", e);
     res.status(500).json({ error: "Could not load contract file" });
@@ -745,6 +750,60 @@ app.post("/contracts/detect-fields", requireAuth, async (req, res) => {
   } catch (e) {
     console.error("[contracts/detect-fields]", e);
     res.status(500).json({ error: "Field detection failed" });
+  }
+});
+
+const REBUILD_PROMPT = `You are given page images of a roofing or home improvement contract. Transcribe the ENTIRE contract exactly, word for word. Do not summarize, reword, shorten, paraphrase, or omit anything. Every clause, sentence, term, number, percentage, dollar amount, license number, warranty, and notice must be reproduced exactly as written. Your only job is to identify the structure of the document so it can be re-typeset cleanly. Return ONLY a JSON object and nothing else, in this exact shape: {"title":"the contract title","sections":[ ]}. Each item in sections must be one of these four forms: {"kind":"heading","text":"a section heading exactly as written"} or {"kind":"paragraph","text":"a clause or paragraph transcribed word for word"} or {"kind":"field","label":"the printed label of a fill-in blank","field_id":"an id from the list","multiline":false} or {"kind":"signature"}. For every blank line, underline, or labeled fill-in space in the contract, emit a field section. Choose field_id from this list: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, date_signed, other. Set multiline to true only for large write-in areas such as the scope or description of work. Represent the customer signing area as a single signature section. Keep every section in the original reading order and transcribe the document completely from start to finish.`;
+
+app.post("/contracts/rebuild", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    const pages = (req.body && req.body.pages) || [];
+    if (!Array.isArray(pages) || !pages.length) return res.status(400).json({ error: "No contract pages were provided" });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: "AI is not configured" });
+    const content = [];
+    for (let i = 0; i < pages.length && i < 10; i++) {
+      let raw = String(pages[i] || "");
+      const comma = raw.indexOf(",");
+      if (raw.slice(0, 5) === "data:" && comma >= 0) raw = raw.slice(comma + 1);
+      content.push({ type: "text", text: "PAGE " + (i + 1) + ":" });
+      content.push({ type: "image", source: { type: "base64", media_type: "image/png", data: raw } });
+    }
+    content.push({ type: "text", text: REBUILD_PROMPT });
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 8000, messages: [{ role: "user", content: content }] })
+    });
+    const data = await response.json();
+    if (!response.ok) { console.error("[rebuild] anthropic", response.status, data); return res.status(502).json({ error: "The AI could not read the contract" }); }
+    let text = (data.content || []).filter(c => c.type === "text").map(c => c.text).join("").trim();
+    const lb = text.indexOf("{");
+    const rb = text.lastIndexOf("}");
+    if (lb >= 0 && rb > lb) text = text.slice(lb, rb + 1);
+    let docObj = null;
+    try { docObj = JSON.parse(text); } catch (e) { console.error("[rebuild] parse failed"); return res.status(502).json({ error: "The rebuilt contract could not be read. Please try again." }); }
+    if (!docObj || !Array.isArray(docObj.sections) || !docObj.sections.length) return res.status(502).json({ error: "The rebuilt contract came back incomplete. Please try again." });
+    let previewBuf = null;
+    try { previewBuf = await renderContractPdf(docObj, { mode: "blank" }); }
+    catch (e) { console.error("[rebuild] render", e); return res.status(500).json({ error: "Could not render the rebuilt contract" }); }
+    res.json({ doc: docObj, preview_pdf_base64: Buffer.from(previewBuf).toString("base64") });
+  } catch (e) {
+    console.error("[contracts/rebuild]", e);
+    res.status(500).json({ error: "Contract rebuild failed" });
+  }
+});
+
+app.post("/contracts/rebuild/save", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    const doc = req.body && req.body.doc;
+    if (!doc || !Array.isArray(doc.sections) || !doc.sections.length) return res.status(400).json({ error: "Invalid contract document" });
+    await q("UPDATE user_contracts SET doc_json=$1 WHERE user_id=$2", [JSON.stringify(doc), req.user.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[contracts/rebuild:save]", e);
+    res.status(500).json({ error: "Could not save the rebuilt contract" });
   }
 });
 
@@ -911,6 +970,128 @@ async function fillContractPdf(contractBytes, fieldMap, body, user) {
     const ls = last.getSize();
     last.drawText("[sig|req|signer1]", { x: 60, y: 70, size: 7, font: font, color: white });
     last.drawText("[date|req|signer1]", { x: ls.width - 180, y: 70, size: 7, font: font, color: white });
+  }
+  return await pdf.save();
+}
+
+async function renderContractPdf(doc, opts) {
+  opts = opts || {};
+  var mode = opts.mode || "blank";
+  var body = opts.body || {};
+  var pdf = await PDFDocument.create();
+  var font = await pdf.embedFont(StandardFonts.Helvetica);
+  var bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  var W = 612, H = 792, M = 58;
+  var CW = W - 2 * M;
+  var ink = rgb(0.13, 0.12, 0.11);
+  var soft = rgb(0.42, 0.39, 0.35);
+  var line = rgb(0.62, 0.59, 0.54);
+  var white = rgb(1, 1, 1);
+  var accent = rgb(1, 0.42, 0.21);
+  var page = pdf.addPage([W, H]);
+  var y = H - M;
+  function newPage() { page = pdf.addPage([W, H]); y = H - M; }
+  function need(hh) { if (y - hh < M + 14) newPage(); }
+  function todayStr() { return new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }); }
+  function valueFor(id) {
+    if (id === "client_name") return body.signer_name || body.claim_name || "";
+    if (id === "property_address") return body.property_address || body.address || "";
+    if (id === "phone") return body.signer_phone || body.phone || "";
+    if (id === "email") return body.signer_email || "";
+    if (id === "carrier") return body.carrier || body.insurance_carrier || "";
+    if (id === "claim_number") return body.claim_number || "";
+    if (id === "price") { var p = body.price ? String(body.price).trim() : ""; return p ? (p.charAt(0) === "$" ? p : "$" + p) : ""; }
+    if (id === "scope") return body.scope || "";
+    if (id === "agreement_date") return todayStr();
+    return "";
+  }
+  function drawWrapped(text, fnt, size, color, lh) {
+    var ls = apWrap(String(text == null ? "" : text), fnt, size, CW);
+    for (var i = 0; i < ls.length; i++) {
+      need(lh);
+      page.drawText(ls[i], { x: M, y: y - size, size: size, font: fnt, color: color });
+      y -= lh;
+    }
+  }
+  if (doc.title) {
+    var t = String(doc.title).toUpperCase();
+    var ts = 17;
+    while (ts > 11 && bold.widthOfTextAtSize(t, ts) > CW) ts -= 0.5;
+    need(34);
+    page.drawText(t, { x: M + (CW - bold.widthOfTextAtSize(t, ts)) / 2, y: y - ts, size: ts, font: bold, color: ink });
+    y -= ts + 9;
+    page.drawLine({ start: { x: M, y: y }, end: { x: W - M, y: y }, thickness: 1.4, color: accent });
+    y -= 22;
+  }
+  var sawSig = false;
+  var sections = Array.isArray(doc.sections) ? doc.sections : [];
+  for (var s = 0; s < sections.length; s++) {
+    var sec = sections[s] || {};
+    var kind = sec.kind || "paragraph";
+    if (kind === "heading") {
+      y -= 9;
+      need(20);
+      page.drawText(String(sec.text || "").toUpperCase(), { x: M, y: y - 10.5, size: 10.5, font: bold, color: ink });
+      y -= 20;
+    } else if (kind === "paragraph") {
+      if (sec.text) { drawWrapped(sec.text, font, 9.5, ink, 13); y -= 6; }
+    } else if (kind === "field") {
+      var label = String(sec.label || "Field");
+      var fid = sec.field_id || "other";
+      var val = (mode === "filled") ? valueFor(fid) : "";
+      if (sec.multiline) {
+        need(22);
+        page.drawText(label + ":", { x: M, y: y - 9.5, size: 9.5, font: bold, color: ink });
+        y -= 15;
+        if (val) { drawWrapped(val, font, 9.5, ink, 13); y -= 6; }
+        else { for (var k = 0; k < 3; k++) { need(16); page.drawLine({ start: { x: M, y: y - 2 }, end: { x: W - M, y: y - 2 }, thickness: 0.7, color: line }); y -= 16; } y -= 3; }
+      } else {
+        need(22);
+        var lab = label + ":  ";
+        var lw = bold.widthOfTextAtSize(lab, 9.5);
+        page.drawText(lab, { x: M, y: y - 9.5, size: 9.5, font: bold, color: ink });
+        if (mode === "filled" && fid === "signature") {
+          page.drawLine({ start: { x: M + lw, y: y - 11 }, end: { x: W - M, y: y - 11 }, thickness: 1, color: ink });
+          page.drawText("[sig|req|signer1]", { x: M + lw + 2, y: y - 9, size: 7, font: font, color: white });
+          sawSig = true;
+        } else if (mode === "filled" && fid === "date_signed") {
+          page.drawLine({ start: { x: M + lw, y: y - 11 }, end: { x: W - M, y: y - 11 }, thickness: 1, color: ink });
+          page.drawText("[date|req|signer1]", { x: M + lw + 2, y: y - 9, size: 7, font: font, color: white });
+        } else if (val) {
+          page.drawText(String(val), { x: M + lw, y: y - 9.5, size: 9.5, font: font, color: ink });
+        } else {
+          page.drawLine({ start: { x: M + lw, y: y - 11 }, end: { x: W - M, y: y - 11 }, thickness: 0.7, color: line });
+        }
+        y -= 21;
+      }
+    } else if (kind === "signature") {
+      y -= 20;
+      need(58);
+      var colW = (CW - 34) / 2;
+      page.drawLine({ start: { x: M, y: y }, end: { x: M + colW, y: y }, thickness: 1, color: ink });
+      page.drawLine({ start: { x: M + colW + 34, y: y }, end: { x: W - M, y: y }, thickness: 1, color: ink });
+      if (mode === "filled") {
+        page.drawText("[sig|req|signer1]", { x: M + 2, y: y + 7, size: 7, font: font, color: white });
+        page.drawText("[date|req|signer1]", { x: M + colW + 36, y: y + 7, size: 7, font: font, color: white });
+        sawSig = true;
+      }
+      y -= 13;
+      page.drawText("Client Signature", { x: M, y: y, size: 8.5, font: font, color: soft });
+      page.drawText("Date Signed", { x: M + colW + 34, y: y, size: 8.5, font: font, color: soft });
+      y -= 20;
+    }
+  }
+  if (mode === "filled" && !sawSig) {
+    need(58);
+    y -= 16;
+    var cw2 = (CW - 34) / 2;
+    page.drawLine({ start: { x: M, y: y }, end: { x: M + cw2, y: y }, thickness: 1, color: ink });
+    page.drawLine({ start: { x: M + cw2 + 34, y: y }, end: { x: W - M, y: y }, thickness: 1, color: ink });
+    page.drawText("[sig|req|signer1]", { x: M + 2, y: y + 7, size: 7, font: font, color: white });
+    page.drawText("[date|req|signer1]", { x: M + cw2 + 36, y: y + 7, size: 7, font: font, color: white });
+    y -= 13;
+    page.drawText("Client Signature", { x: M, y: y, size: 8.5, font: font, color: soft });
+    page.drawText("Date Signed", { x: M + cw2 + 34, y: y, size: 8.5, font: font, color: soft });
   }
   return await pdf.save();
 }
