@@ -49,7 +49,7 @@ app.use(cors({
 app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), handleStripeWebhook);
 
 // All other routes use JSON
-app.use(express.json({ limit: '25mb' })); // 25mb so phone-quality JPEGs fit
+app.use(express.json({ limit: '60mb' })); // 25mb so phone-quality JPEGs fit
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder');
 
@@ -1358,6 +1358,54 @@ app.post("/places/details", requireAuth, async (req, res) => {
   }
 });
 
+app.post("/cloud/jobs", requireAuth, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const jobId = String(b.job_id || "").trim();
+    const payload = (typeof b.payload === "string") ? b.payload : "";
+    if (!jobId || !payload) return res.status(400).json({ error: "job_id and payload required" });
+    if (payload.length > 56 * 1024 * 1024) return res.status(413).json({ error: "That job is too large to move to the cloud" });
+    const name = String(b.name || "Job").slice(0, 200);
+    await q("DELETE FROM cloud_jobs WHERE user_id=$1 AND job_id=$2", [req.user.id, jobId]);
+    await q("INSERT INTO cloud_jobs (user_id, job_id, name, payload, size_bytes, updated_at) VALUES ($1,$2,$3,$4,$5, now())", [req.user.id, jobId, name, payload, payload.length]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[cloud/jobs POST]", e);
+    res.status(500).json({ error: "Could not move the job to the cloud" });
+  }
+});
+
+app.get("/cloud/jobs", requireAuth, async (req, res) => {
+  try {
+    const rows = await q("SELECT job_id, name, size_bytes, updated_at FROM cloud_jobs WHERE user_id=$1 ORDER BY updated_at DESC", [req.user.id]);
+    res.json({ jobs: rows });
+  } catch (e) {
+    console.error("[cloud/jobs GET]", e);
+    res.status(500).json({ error: "Could not load cloud jobs" });
+  }
+});
+
+app.get("/cloud/jobs/:jobId", requireAuth, async (req, res) => {
+  try {
+    const rows = await q("SELECT payload, name FROM cloud_jobs WHERE user_id=$1 AND job_id=$2", [req.user.id, String(req.params.jobId)]);
+    if (!rows.length) return res.status(404).json({ error: "Not found in the cloud" });
+    res.json({ payload: rows[0].payload, name: rows[0].name });
+  } catch (e) {
+    console.error("[cloud/jobs/:id GET]", e);
+    res.status(500).json({ error: "Could not download the job" });
+  }
+});
+
+app.delete("/cloud/jobs/:jobId", requireAuth, async (req, res) => {
+  try {
+    await q("DELETE FROM cloud_jobs WHERE user_id=$1 AND job_id=$2", [req.user.id, String(req.params.jobId)]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[cloud/jobs/:id DELETE]", e);
+    res.status(500).json({ error: "Could not remove the job" });
+  }
+});
+
 function haversineMi(lat1, lng1, lat2, lng2) {
   const R = 3958.8;
   const toRad = d => d * Math.PI / 180;
@@ -1719,6 +1767,7 @@ If the roof is in normal condition with no specific damage indicators visible: s
 async function boot() {
   try {
     await ensureSchema();
+    try { await q("CREATE TABLE IF NOT EXISTS cloud_jobs (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, job_id TEXT NOT NULL, name TEXT, payload TEXT, size_bytes INTEGER, updated_at TIMESTAMPTZ DEFAULT now())"); } catch (e) { console.error("[schema] cloud_jobs", e); }
     app.listen(port, () => {
       console.log(`[boot] HailGrade API listening on :${port}`);
     });
