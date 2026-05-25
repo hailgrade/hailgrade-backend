@@ -1237,12 +1237,67 @@ app.post("/roof/measure", requireAuth, async (req, res) => {
     if (!areaM2) return res.status(404).json({ error: "No roof area found for this property" });
     const sqft = areaM2 * 10.76391;
     const segments = Array.isArray(sp.roofSegmentStats) ? sp.roofSegmentStats.length : null;
+
+    // --- Aerial roof image + roof-plane outlines (Google Static Maps) ---
+    let roofImg = null, roofImgType = null, mapMeta = null;
+    const segBoxes = [];
+    try {
+      const segStats = Array.isArray(sp.roofSegmentStats) ? sp.roofSegmentStats : [];
+      let minLat = lat, maxLat = lat, minLng = lng, maxLng = lng;
+      segStats.forEach(function (s) {
+        const bb = s && s.boundingBox;
+        if (!bb || !bb.sw || !bb.ne) return;
+        const sLat = Number(bb.sw.latitude), nLat = Number(bb.ne.latitude);
+        const wLng = Number(bb.sw.longitude), eLng = Number(bb.ne.longitude);
+        if ([sLat, nLat, wLng, eLng].some(isNaN)) return;
+        minLat = Math.min(minLat, sLat, nLat); maxLat = Math.max(maxLat, sLat, nLat);
+        minLng = Math.min(minLng, wLng, eLng); maxLng = Math.max(maxLng, wLng, eLng);
+        segBoxes.push({
+          area_m2: Math.round(Number((s.stats && s.stats.areaMeters2) || 0)),
+          pitch: (s.pitchDegrees != null) ? Math.round(s.pitchDegrees) : null,
+          azimuth: (s.azimuthDegrees != null) ? Math.round(s.azimuthDegrees) : null,
+          sw: { lat: sLat, lng: wLng },
+          ne: { lat: nLat, lng: eLng }
+        });
+      });
+      const padLat = Math.max((maxLat - minLat) * 0.25, 0.00012);
+      const padLng = Math.max((maxLng - minLng) * 0.25, 0.00012);
+      minLat -= padLat; maxLat += padLat; minLng -= padLng; maxLng += padLng;
+      const ctrLat = (minLat + maxLat) / 2, ctrLng = (minLng + maxLng) / 2;
+      let zoom = 21;
+      for (; zoom > 16; zoom--) {
+        const worldPx = 256 * Math.pow(2, zoom);
+        const xOf = function (L) { return (L + 180) / 360 * worldPx; };
+        const yOf = function (L) { let si = Math.sin(L * Math.PI / 180); si = Math.max(-0.9999, Math.min(0.9999, si)); return (0.5 - Math.log((1 + si) / (1 - si)) / (4 * Math.PI)) * worldPx; };
+        if (Math.abs(xOf(maxLng) - xOf(minLng)) <= 620 && Math.abs(yOf(maxLat) - yOf(minLat)) <= 620) break;
+      }
+      const mapUrl = "https://maps.googleapis.com/maps/api/staticmap?center=" +
+        ctrLat + "," + ctrLng + "&zoom=" + zoom +
+        "&size=640x640&scale=2&maptype=satellite&format=jpg&key=" + encodeURIComponent(key);
+      const mr = await fetch(mapUrl);
+      const ctype = (mr.headers.get("content-type") || "");
+      if (mr.ok && ctype.indexOf("image") === 0) {
+        const ab = await mr.arrayBuffer();
+        roofImg = Buffer.from(ab).toString("base64");
+        roofImgType = ctype.split(";")[0];
+        mapMeta = { center: { lat: ctrLat, lng: ctrLng }, zoom: zoom, width: 1280, height: 1280, scale: 2 };
+      } else {
+        console.error("[roof/measure] static map unavailable", mr.status, ctype);
+      }
+    } catch (me) {
+      console.error("[roof/measure] image step failed", me && me.message);
+    }
+
     res.json({
       squares: Math.round((sqft / 100) * 10) / 10,
       area_sqft: Math.round(sqft),
       area_m2: Math.round(areaM2),
       segments: segments,
-      lat: lat, lng: lng
+      lat: lat, lng: lng,
+      image_base64: roofImg,
+      image_media_type: roofImgType,
+      map: mapMeta,
+      roof_segments: segBoxes
     });
   } catch (e) {
     console.error("[roof/measure]", e);
