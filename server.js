@@ -298,7 +298,7 @@ app.patch('/me', requireAuth, async (req, res) => {
 // Body: { image: base64-encoded JPEG/PNG, media_type, slope, context: {dateOfLoss, carrier, testSquare}}
 // Response: the parsed JSON from Claude, plus a server-side analysis_id you can store on the client.
 app.post('/analyze', requireAuth, requireActiveSubscription, async (req, res) => {
-  const { image, media_type, slope, context = {}, photo_local_id, claim_local_id } = req.body || {};
+  const { image, image_enhanced, media_type, slope, context = {}, photo_local_id, claim_local_id } = req.body || {};
   if (!image || !media_type) return res.status(400).json({ error: 'image_required' });
 
   // Soft monthly quota check (avoid runaway costs from a single user)
@@ -308,7 +308,10 @@ app.post('/analyze', requireAuth, requireActiveSubscription, async (req, res) =>
     return res.status(429).json({ error: 'quota_exceeded', message: `Monthly quota of ${quota} analyses hit. Resets on ${u.monthly_analyses_reset_at}.` });
   }
 
-  const prompt = buildAnalysisPrompt({ slope, ...context });
+  let prompt = buildAnalysisPrompt({ slope, ...context });
+  if (image_enhanced) {
+    prompt = "IMPORTANT: You are given TWO images that are the SAME single roof photo. The first is the original. The second is a contrast-enhanced copy of that same photo (local-contrast boosted) that makes subtle hail bruising, dents and granule loss easier to see. Treat them as ONE photo, not two. Use the enhanced copy as an aid to spot subtle damage and to confirm or rule out marginal findings, but judge real severity from the original. Do NOT double-count: an impact visible in both copies is ONE finding. The enhancement can exaggerate texture and shadow, so do not report damage that is only an artifact of the enhancement and absent in the original.\n\n" + prompt;
+  }
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -325,6 +328,7 @@ app.post('/analyze', requireAuth, requireActiveSubscription, async (req, res) =>
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type, data: image }},
+            ...(image_enhanced ? [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: image_enhanced }}] : []),
             { type: 'text', text: prompt }
           ]
         }]
