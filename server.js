@@ -563,6 +563,9 @@ async function ensureContractsSchema() {
   try { await q("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS price TEXT"); } catch (e) {}
   try { await q("ALTER TABLE user_contracts ADD COLUMN IF NOT EXISTS field_map TEXT"); } catch (e) {}
   try { await q("ALTER TABLE user_contracts ADD COLUMN IF NOT EXISTS doc_json TEXT"); } catch (e) {}
+  try { await q("ALTER TABLE user_contracts DROP CONSTRAINT IF EXISTS user_contracts_pkey"); } catch (e) {}
+  try { await q("ALTER TABLE user_contracts ADD COLUMN IF NOT EXISTS id SERIAL PRIMARY KEY"); } catch (e) {}
+  try { await q("ALTER TABLE user_contracts ADD COLUMN IF NOT EXISTS name TEXT"); } catch (e) {}
   _contractsSchemaReady = true;
 }
 function dsAuthHeader() {
@@ -577,7 +580,7 @@ app.post("/contracts/template", requireAuth, async (req, res) => {
     if (!body.pdf_base64) return res.status(400).json({ error: "Missing contract file" });
     const clean = String(body.pdf_base64).replace(/^data:[^,]*,/, "");
     const fn = body.filename || "contract.pdf";
-    await q("INSERT INTO user_contracts (user_id, filename, pdf_base64, uploaded_at) VALUES ($1,$2,$3, now()) ON CONFLICT (user_id) DO UPDATE SET filename=$2, pdf_base64=$3, uploaded_at=now(), field_map=NULL, doc_json=NULL", [req.user.id, fn, clean]);
+    await q("INSERT INTO user_contracts (user_id, name, filename, pdf_base64, uploaded_at) VALUES ($1,$2,$3,$4, now())", [req.user.id, ((body.name || "").trim() || fn), fn, clean]);
     res.json({ ok: true, filename: fn });
   } catch (e) {
     console.error("[contracts/template]", e);
@@ -588,7 +591,7 @@ app.post("/contracts/template", requireAuth, async (req, res) => {
 app.get("/contracts/template", requireAuth, async (req, res) => {
   try {
     await ensureContractsSchema();
-    const rows = dsRowsOf(await q("SELECT filename, uploaded_at FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    const rows = dsRowsOf(await q("SELECT filename, uploaded_at FROM user_contracts WHERE user_id=$1 ORDER BY id DESC LIMIT 1", [req.user.id]));
     if (!rows.length) return res.json({ hasTemplate: false });
     res.json({ hasTemplate: true, filename: rows[0].filename, uploaded_at: rows[0].uploaded_at });
   } catch (e) {
@@ -605,7 +608,7 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     const signerName = (body.signer_name || "").trim();
     const signerEmail = (body.signer_email || "").trim();
     if (!signerName || !signerEmail) return res.status(400).json({ error: "Client name and email are required" });
-    const tpl = dsRowsOf(await q("SELECT filename, pdf_base64, field_map, doc_json FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    const tpl = dsRowsOf(await q("SELECT id, filename, pdf_base64, field_map, doc_json FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$1))", [req.user.id, ((req.body && req.body.contract_id) ? parseInt(req.body.contract_id, 10) : null)]));
     if (!tpl.length) return res.status(400).json({ error: "Upload your contract first" });
     const pdfBuf = Buffer.from(tpl[0].pdf_base64, "base64");
     let docJson = null;
@@ -723,11 +726,11 @@ app.get("/contracts/status/:id", requireAuth, async (req, res) => {
 app.get("/contracts/template/file", requireAuth, async (req, res) => {
   try {
     await ensureContractsSchema();
-    const rows = dsRowsOf(await q("SELECT filename, pdf_base64, uploaded_at, field_map, doc_json FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    const rows = dsRowsOf(await q("SELECT id, name, filename, pdf_base64, uploaded_at, field_map, doc_json FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$1))", [req.user.id, (req.query.id ? parseInt(req.query.id, 10) : null)]));
     if (!rows.length) return res.status(404).json({ error: "No contract on file" });
     let _fm = null; try { _fm = rows[0].field_map ? JSON.parse(rows[0].field_map) : null; } catch (e) { _fm = null; }
     let _doc = null; try { _doc = rows[0].doc_json ? JSON.parse(rows[0].doc_json) : null; } catch (e) { _doc = null; }
-    res.json({ filename: rows[0].filename, pdf_base64: rows[0].pdf_base64, uploaded_at: rows[0].uploaded_at, field_map: _fm, doc: _doc });
+    res.json({ id: rows[0].id, name: rows[0].name || "", filename: rows[0].filename, pdf_base64: rows[0].pdf_base64, uploaded_at: rows[0].uploaded_at, field_map: _fm, doc: _doc });
   } catch (e) {
     console.error("[contracts/template/file]", e);
     res.status(500).json({ error: "Could not load contract file" });
@@ -790,7 +793,7 @@ app.post("/contracts/rebuild", requireAuth, async (req, res) => {
   try {
     await ensureContractsSchema();
     if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: "AI is not configured" });
-    const tpl = dsRowsOf(await q("SELECT pdf_base64 FROM user_contracts WHERE user_id=$1", [req.user.id]));
+    const tpl = dsRowsOf(await q("SELECT id, pdf_base64 FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$1))", [req.user.id, ((req.body && req.body.contract_id) ? parseInt(req.body.contract_id, 10) : null)]));
     if (!tpl.length || !tpl[0].pdf_base64) return res.status(400).json({ error: "Upload your contract first" });
     let pdfB64 = String(tpl[0].pdf_base64 || "");
     const cidx = pdfB64.indexOf(",");
@@ -816,7 +819,7 @@ app.post("/contracts/rebuild", requireAuth, async (req, res) => {
     let previewBuf = null;
     try { previewBuf = await renderContractPdf(docObj, { mode: "blank" }); }
     catch (e) { console.error("[rebuild] render", e); return res.status(500).json({ error: "Could not render the rebuilt contract" }); }
-    res.json({ doc: docObj, preview_pdf_base64: Buffer.from(previewBuf).toString("base64") });
+    res.json({ doc: docObj, contract_id: (tpl[0] && tpl[0].id) || null, preview_pdf_base64: Buffer.from(previewBuf).toString("base64") });
   } catch (e) {
     console.error("[contracts/rebuild]", e);
     res.status(500).json({ error: "Contract rebuild failed" });
@@ -828,11 +831,22 @@ app.post("/contracts/rebuild/save", requireAuth, async (req, res) => {
     await ensureContractsSchema();
     const doc = req.body && req.body.doc;
     if (!doc || !Array.isArray(doc.sections) || !doc.sections.length) return res.status(400).json({ error: "Invalid contract document" });
-    await q("UPDATE user_contracts SET doc_json=$1 WHERE user_id=$2", [JSON.stringify(doc), req.user.id]);
+    await q("UPDATE user_contracts SET doc_json=$1 WHERE user_id=$2 AND id = COALESCE($3::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$2))", [JSON.stringify(doc), req.user.id, ((req.body && req.body.contract_id) ? parseInt(req.body.contract_id, 10) : null)]);
     res.json({ ok: true });
   } catch (e) {
     console.error("[contracts/rebuild:save]", e);
     res.status(500).json({ error: "Could not save the rebuilt contract" });
+  }
+});
+
+app.get("/contracts/templates", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    const rows = dsRowsOf(await q("SELECT id, name, filename, uploaded_at, (doc_json IS NOT NULL) AS has_doc FROM user_contracts WHERE user_id=$1 ORDER BY id DESC", [req.user.id]));
+    res.json({ contracts: rows });
+  } catch (e) {
+    console.error("[contracts/templates]", e);
+    res.status(500).json({ error: "Could not load contracts" });
   }
 });
 
