@@ -1306,6 +1306,58 @@ app.post("/roof/measure", requireAuth, async (req, res) => {
 });
 /* =================== END ROOF MEASUREMENT =================== */
 
+app.post("/places/suggest", requireAuth, async (req, res) => {
+  try {
+    const key = process.env.GOOGLE_SOLAR_API_KEY || "";
+    if (!key) return res.status(503).json({ error: "not_configured" });
+    const q = String((req.body && req.body.q) || "").trim();
+    if (q.length < 3) return res.json({ suggestions: [] });
+    const r = await fetch("https://places.googleapis.com/v1/places:autocomplete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Goog-Api-Key": key },
+      body: JSON.stringify({ input: q, includedRegionCodes: ["us"] })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      console.error("[places/suggest]", r.status, JSON.stringify(j).slice(0, 200));
+      return res.status(502).json({ error: "places_unavailable" });
+    }
+    const out = (j.suggestions || []).map(function (s) {
+      const p = s.placePrediction || {};
+      return { placeId: p.placeId || "", text: (p.text && p.text.text) || "" };
+    }).filter(function (x) { return x.placeId && x.text; });
+    res.json({ suggestions: out });
+  } catch (e) {
+    console.error("[places/suggest]", e);
+    res.status(500).json({ error: "suggest_failed" });
+  }
+});
+
+app.post("/places/details", requireAuth, async (req, res) => {
+  try {
+    const key = process.env.GOOGLE_SOLAR_API_KEY || "";
+    if (!key) return res.status(503).json({ error: "not_configured" });
+    const pid = String((req.body && req.body.place_id) || "").trim();
+    if (!pid) return res.status(400).json({ error: "place_id_required" });
+    const r = await fetch("https://places.googleapis.com/v1/places/" + encodeURIComponent(pid), {
+      headers: { "X-Goog-Api-Key": key, "X-Goog-FieldMask": "formattedAddress,location" }
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      console.error("[places/details]", r.status, JSON.stringify(j).slice(0, 200));
+      return res.status(502).json({ error: "details_unavailable" });
+    }
+    res.json({
+      address: j.formattedAddress || "",
+      lat: (j.location && j.location.latitude != null) ? j.location.latitude : null,
+      lng: (j.location && j.location.longitude != null) ? j.location.longitude : null
+    });
+  } catch (e) {
+    console.error("[places/details]", e);
+    res.status(500).json({ error: "details_failed" });
+  }
+});
+
 function haversineMi(lat1, lng1, lat2, lng2) {
   const R = 3958.8;
   const toRad = d => d * Math.PI / 180;
