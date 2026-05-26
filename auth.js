@@ -36,6 +36,7 @@ export async function requireAuth(req, res, next) {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     const user = await one('SELECT * FROM users WHERE id = $1', [payload.uid]);
     if (!user) return res.status(401).json({ error: 'user_not_found' });
+    if (user.active === false) return res.status(403).json({ error: 'account_deactivated', message: 'This account has been deactivated by your organization administrator.' });
     req.user = user;
     next();
   } catch (err) {
