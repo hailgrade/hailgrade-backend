@@ -752,6 +752,64 @@ app.delete('/leads/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ============ Team jobs (master account aggregated pipeline) ============
+// Each member's device auto-syncs a denormalized snapshot of their local jobs.
+// Owner reads the aggregated view to see where every deal sits.
+
+// POST /team-jobs  - bulk upsert of the caller's jobs (silently skipped for solo users).
+app.post('/team-jobs', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.org_id) return res.json({ ok: true, skipped: 'solo_user' });
+    const jobs = (req.body && req.body.jobs) || [];
+    if (!Array.isArray(jobs)) return res.status(400).json({ error: 'jobs_must_be_array' });
+    let upserted = 0;
+    for (const j of jobs) {
+      if (!j || !j.claim_local_id) continue;
+      try {
+        await q(
+          'INSERT INTO team_jobs (user_id, org_id, claim_local_id, name, address, insured, insured_email, carrier, claim_number, stage, has_damage, contract_status, finalized, photos_count, last_touched) VALUES ' + '($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (user_id, claim_local_id) DO UPDATE SET name = EXCLUDED.name, address = EXCLUDED.address, insured = EXCLUDED.insured, insured_email = EXCLUDED.insured_email, carrier = EXCLUDED.carrier, claim_number = EXCLUDED.claim_number, stage = EXCLUDED.stage, has_damage = EXCLUDED.has_damage, contract_status = EXCLUDED.contract_status, finalized = EXCLUDED.finalized, photos_count = EXCLUDED.photos_count, last_touched = EXCLUDED.last_touched, updated_at = now()',
+          [req.user.id, req.user.org_id, String(j.claim_local_id), j.name || null, j.address || null, j.insured || null, j.insured_email || null, j.carrier || null, j.claim_number || null, j.stage || null, !!j.has_damage, j.contract_status || null, !!j.finalized, parseInt(j.photos_count) || 0, j.last_touched || new Date().toISOString()]
+        );
+        upserted++;
+      } catch (e) { console.error('[team-jobs upsert]', e.message); }
+    }
+    res.json({ ok: true, upserted });
+  } catch (err) {
+    console.error('[team-jobs POST]', err);
+    res.status(500).json({ error: 'sync_failed', detail: err.message });
+  }
+});
+
+// GET /team-jobs  - owner-only. Returns every member's jobs in the org.
+app.get('/team-jobs', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.org_id || req.user.org_role !== 'owner') {
+      return res.status(403).json({ error: 'owner_only' });
+    }
+    const rows = await q(
+      'SELECT t.*, u.full_name AS member_name, u.email AS member_email FROM team_jobs t JOIN users u ON u.id = t.user_id WHERE u.org_id = ' + '$1' + ' ORDER BY t.last_touched DESC NULLS LAST, t.updated_at DESC LIMIT 1000',
+      [req.user.org_id]
+    );
+    res.json({ jobs: rows });
+  } catch (err) {
+    console.error('[team-jobs GET]', err);
+    res.status(500).json({ error: 'list_failed', detail: err.message });
+  }
+});
+
+// DELETE /team-jobs/:claimId  - member-initiated cleanup when a local job is removed.
+app.delete('/team-jobs/:claimId', requireAuth, async (req, res) => {
+  try {
+    const cl = req.params.claimId;
+    if (!cl) return res.status(400).json({ error: 'bad_id' });
+    await q('DELETE FROM team_jobs WHERE user_id = ' + '$1' + ' AND claim_local_id = ' + '$2', [req.user.id, cl]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[team-jobs DELETE]', err);
+    res.status(500).json({ error: 'delete_failed', detail: err.message });
+  }
+});
+
 app.patch('/me', requireAuth, async (req, res) => {
   const { full_name, license_number, firm_name } = req.body || {};
   await q(
@@ -2252,6 +2310,9 @@ async function boot() {
     try { await q("CREATE TABLE IF NOT EXISTS leads (id SERIAL PRIMARY KEY, org_id INTEGER, name TEXT NOT NULL, email TEXT, phone TEXT, address TEXT, carrier TEXT, claim_number TEXT, source TEXT, notes TEXT, assigned_to INTEGER, assigned_at TIMESTAMPTZ, assigned_by INTEGER, status TEXT NOT NULL DEFAULT 'new', converted_claim_local_id TEXT, converted_at TIMESTAMPTZ, converted_by INTEGER, created_by INTEGER NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"); } catch (e) { console.error('[boot] leads table', e.message); }
     try { await q("CREATE INDEX IF NOT EXISTS leads_org_idx ON leads (org_id, status, created_at DESC)"); } catch (e) {}
     try { await q("CREATE INDEX IF NOT EXISTS leads_assigned_idx ON leads (assigned_to, status)"); } catch (e) {}
+    try { await q("CREATE TABLE IF NOT EXISTS team_jobs (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, org_id INTEGER, claim_local_id TEXT NOT NULL, name TEXT, address TEXT, insured TEXT, insured_email TEXT, carrier TEXT, claim_number TEXT, stage TEXT, has_damage BOOLEAN, contract_status TEXT, finalized BOOLEAN, photos_count INTEGER, last_touched TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"); } catch (e) { console.error('[boot] team_jobs table', e.message); }
+    try { await q("CREATE UNIQUE INDEX IF NOT EXISTS team_jobs_user_claim ON team_jobs (user_id, claim_local_id)"); } catch (e) {}
+    try { await q("CREATE INDEX IF NOT EXISTS team_jobs_org_idx ON team_jobs (org_id)"); } catch (e) {}
     try { await q("CREATE TABLE IF NOT EXISTS cloud_jobs (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, job_id TEXT NOT NULL, name TEXT, payload TEXT, size_bytes INTEGER, updated_at TIMESTAMPTZ DEFAULT now())"); } catch (e) { console.error("[schema] cloud_jobs", e); }
     app.listen(port, () => {
       console.log(`[boot] HailGrade API listening on :${port}`);
