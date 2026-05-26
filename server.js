@@ -123,7 +123,8 @@ app.get('/me', requireAuth, async (req, res) => {
       id: u.id, email: u.email, full_name: u.full_name, license_number: u.license_number,
       firm_name: u.firm_name, role: u.role, plan: u.plan, plan_status: u.plan_status,
       plan_renews_at: u.plan_renews_at,
-      monthly_analyses_used: u.monthly_analyses_used
+      monthly_analyses_used: u.monthly_analyses_used,
+      org_id: u.org_id, org_role: u.org_role, active: u.active
     }
   });
 });
