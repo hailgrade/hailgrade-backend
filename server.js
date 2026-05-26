@@ -306,6 +306,16 @@ async function loadOrgContext(userId) {
   return { org, role: u.org_role || 'member' };
 }
 
+async function templateOwnerIdFor(user) {
+  if (user && user.org_id && user.org_role === 'member') {
+    try {
+      const r = await one('SELECT owner_user_id FROM orgs WHERE id = $1', [user.org_id]);
+      if (r && r.owner_user_id) return r.owner_user_id;
+    } catch (e) {}
+  }
+  return user.id;
+}
+
 // GET /org — current user's org state. Owners also get members (with stats) + invites.
 app.get('/org', requireAuth, async (req, res) => {
   try {
@@ -778,6 +788,7 @@ function dsAuthHeader() {
 function dsRowsOf(r) { return Array.isArray(r) ? r : (r && r.rows ? r.rows : []); }
 
 app.post("/contracts/template", requireAuth, async (req, res) => {
+  if (req.user && req.user.org_id && req.user.org_role === 'member') return res.status(403).json({ error: 'member_cannot_edit_templates', message: 'Your team owner manages contract templates.' });
   try {
     await ensureContractsSchema();
     const body = req.body || {};
@@ -793,6 +804,7 @@ app.post("/contracts/template", requireAuth, async (req, res) => {
 });
 
 app.get("/contracts/template", requireAuth, async (req, res) => {
+  try { req.user.id = await templateOwnerIdFor(req.user); } catch (e) {}
   try {
     await ensureContractsSchema();
     const rows = dsRowsOf(await q("SELECT filename, uploaded_at FROM user_contracts WHERE user_id=$1 ORDER BY id DESC LIMIT 1", [req.user.id]));
@@ -812,7 +824,7 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     const signerName = (body.signer_name || "").trim();
     const signerEmail = (body.signer_email || "").trim();
     if (!signerName || !signerEmail) return res.status(400).json({ error: "Client name and email are required" });
-    const tpl = dsRowsOf(await q("SELECT id, filename, pdf_base64, field_map, doc_json FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$1))", [req.user.id, ((req.body && req.body.contract_id) ? parseInt(req.body.contract_id, 10) : null)]));
+    const tpl = dsRowsOf(await q("SELECT id, filename, pdf_base64, field_map, doc_json FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$1))", [await templateOwnerIdFor(req.user), ((req.body && req.body.contract_id) ? parseInt(req.body.contract_id, 10) : null)]));
     if (!tpl.length) return res.status(400).json({ error: "Upload your contract first" });
     const pdfBuf = Buffer.from(tpl[0].pdf_base64, "base64");
     let docJson = null;
@@ -930,7 +942,7 @@ app.get("/contracts/status/:id", requireAuth, async (req, res) => {
 app.get("/contracts/template/file", requireAuth, async (req, res) => {
   try {
     await ensureContractsSchema();
-    const rows = dsRowsOf(await q("SELECT id, name, filename, pdf_base64, uploaded_at, field_map, doc_json FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$1))", [req.user.id, (req.query.id ? parseInt(req.query.id, 10) : null)]));
+    const rows = dsRowsOf(await q("SELECT id, name, filename, pdf_base64, uploaded_at, field_map, doc_json FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$1))", [await templateOwnerIdFor(req.user), (req.query.id ? parseInt(req.query.id, 10) : null)]));
     if (!rows.length) return res.status(404).json({ error: "No contract on file" });
     let _fm = null; try { _fm = rows[0].field_map ? JSON.parse(rows[0].field_map) : null; } catch (e) { _fm = null; }
     let _doc = null; try { _doc = rows[0].doc_json ? JSON.parse(rows[0].doc_json) : null; } catch (e) { _doc = null; }
@@ -942,6 +954,7 @@ app.get("/contracts/template/file", requireAuth, async (req, res) => {
 });
 
 app.post("/contracts/template/fieldmap", requireAuth, async (req, res) => {
+  if (req.user && req.user.org_id && req.user.org_role === 'member') return res.status(403).json({ error: 'member_cannot_edit_templates', message: 'Your team owner manages contract templates.' });
   try {
     await ensureContractsSchema();
     const fm = (req.body && req.body.field_map) || [];
@@ -957,6 +970,7 @@ app.post("/contracts/template/fieldmap", requireAuth, async (req, res) => {
 const DETECT_FIELDS_PROMPT = `You are looking at page images of a roofing contract. Find every BLANK FILL-IN FIELD that a person would write into: an empty underline, a blank space after a printed label, or an empty box. For each blank, give its position as a fraction of the page from 0 to 1, where x and y are the TOP-LEFT corner measured from the top-left of the page, and w and h are the width and height of the blank. Classify each blank as one of these types by reading the printed label next to it: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, signature, date_signed, other. Use signature for where the customer signs their name. Use date_signed for the date blank right beside that customer signature. Use agreement_date for a contract date or agreement date near the top of the document. Use price for any contract price, total, amount, or dollar figure blank. Be precise with coordinates so the box sits directly on the blank. Return ONLY a JSON array and nothing else, in exactly this shape: [{"type":"client_name","page":1,"x":0.35,"y":0.21,"w":0.4,"h":0.03}]. The page value is 1-based. If you find no blanks, return [].`;
 
 app.post("/contracts/detect-fields", requireAuth, async (req, res) => {
+  if (req.user && req.user.org_id && req.user.org_role === 'member') return res.status(403).json({ error: 'member_cannot_edit_templates', message: 'Your team owner manages contract templates.' });
   try {
     const pages = (req.body && req.body.pages) || [];
     if (!Array.isArray(pages) || !pages.length) return res.status(400).json({ error: "No contract pages were provided" });
@@ -997,7 +1011,7 @@ app.post("/contracts/rebuild", requireAuth, async (req, res) => {
   try {
     await ensureContractsSchema();
     if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: "AI is not configured" });
-    const tpl = dsRowsOf(await q("SELECT id, pdf_base64 FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$1))", [req.user.id, ((req.body && req.body.contract_id) ? parseInt(req.body.contract_id, 10) : null)]));
+    const tpl = dsRowsOf(await q("SELECT id, pdf_base64 FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$1))", [await templateOwnerIdFor(req.user), ((req.body && req.body.contract_id) ? parseInt(req.body.contract_id, 10) : null)]));
     if (!tpl.length || !tpl[0].pdf_base64) return res.status(400).json({ error: "Upload your contract first" });
     let pdfB64 = String(tpl[0].pdf_base64 || "");
     const cidx = pdfB64.indexOf(",");
@@ -1031,6 +1045,7 @@ app.post("/contracts/rebuild", requireAuth, async (req, res) => {
 });
 
 app.post("/contracts/rebuild/save", requireAuth, async (req, res) => {
+  if (req.user && req.user.org_id && req.user.org_role === 'member') return res.status(403).json({ error: 'member_cannot_edit_templates', message: 'Your team owner manages contract templates.' });
   try {
     await ensureContractsSchema();
     const doc = req.body && req.body.doc;
@@ -1044,6 +1059,7 @@ app.post("/contracts/rebuild/save", requireAuth, async (req, res) => {
 });
 
 app.get("/contracts/templates", requireAuth, async (req, res) => {
+  try { req.user.id = await templateOwnerIdFor(req.user); } catch (e) {}
   try {
     await ensureContractsSchema();
     const rows = dsRowsOf(await q("SELECT id, name, filename, uploaded_at, (doc_json IS NOT NULL) AS has_doc FROM user_contracts WHERE user_id=$1 ORDER BY id DESC", [req.user.id]));
