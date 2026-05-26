@@ -327,7 +327,7 @@ app.get('/org', requireAuth, async (req, res) => {
         [ctx.org.id]
       );
       out.invites = await q(
-        `SELECT id, code, label, created_at, used_by, used_at, revoked
+        `SELECT id, code, label, email, created_at, used_by, used_at, revoked
          FROM org_invites WHERE org_id = $1 ORDER BY created_at DESC`,
         [ctx.org.id]
       );
@@ -364,12 +364,13 @@ app.post('/org/invite', requireAuth, async (req, res) => {
     const ctx = await loadOrgContext(req.user.id);
     if (!ctx.org || ctx.role !== 'owner') return res.status(403).json({ error: 'owner_only' });
     const label = (((req.body && req.body.label) || '').trim()) || null;
+    const email = (((req.body && req.body.email) || '').trim().toLowerCase()) || null;
     let inserted = null;
     for (let attempt = 0; attempt < 6 && !inserted; attempt++) {
       try {
         inserted = await one(
-          'INSERT INTO org_invites (org_id, code, label, created_by) VALUES ($1,$2,$3,$4) RETURNING id, code, label, created_at, used_by, used_at, revoked',
-          [ctx.org.id, makeInviteCode(), label, req.user.id]
+          'INSERT INTO org_invites (org_id, code, label, email, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id, code, label, email, created_at, used_by, used_at, revoked',
+          [ctx.org.id, makeInviteCode(), label, email, req.user.id]
         );
       } catch (e) { inserted = null; }
     }
@@ -1970,7 +1971,8 @@ async function boot() {
     try { await q("CREATE TABLE IF NOT EXISTS org_invites (id SERIAL PRIMARY KEY, org_id INTEGER NOT NULL, code TEXT UNIQUE NOT NULL, label TEXT, created_by INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), used_by INTEGER, used_at TIMESTAMPTZ, revoked BOOLEAN NOT NULL DEFAULT false)"); } catch (e) { console.error('[boot] org_invites table', e.message); }
     try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER"); } catch (e) {}
     try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS org_role TEXT"); } catch (e) {}
-    try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true"); } catch (e) {}
+    try { await q("ALTER TABLE users ADD COLUMN IF NOT NULL DEFAULT true"); } catch (e) {}
+    try { await q("ALTER TABLE org_invites ADD COLUMN IF NOT EXISTS email TEXT"); } catch (e) {}
     try { await q("CREATE TABLE IF NOT EXISTS cloud_jobs (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, job_id TEXT NOT NULL, name TEXT, payload TEXT, size_bytes INTEGER, updated_at TIMESTAMPTZ DEFAULT now())"); } catch (e) { console.error("[schema] cloud_jobs", e); }
     app.listen(port, () => {
       console.log(`[boot] HailGrade API listening on :${port}`);
