@@ -495,6 +495,117 @@ app.post('/org/transfer', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'transfer_failed', detail: err.message });
   }
 });
+// ============ Events / scheduling ============
+// Each user has a list of events. Org owner can also see all team events,
+// assign events to members, and edit/delete them.
+
+// GET /events  - list events. Filters: ?start=ISO&end=ISO&claim=local_id&member=user_id|all (owner only)
+app.get('/events', requireAuth, async (req, res) => {
+  try {
+    const now = Date.now();
+    const start = req.query.start || new Date(now - 7 * 86400000).toISOString();
+    const end = req.query.end || new Date(now + 120 * 86400000).toISOString();
+    const claimId = req.query.claim || null;
+    let rows;
+    if (req.user.org_id && req.user.org_role === 'owner') {
+      const memberFilter = req.query.member;
+      if (memberFilter && memberFilter !== 'all') {
+        const tgt = parseInt(memberFilter);
+        rows = await q('SELECT e.*, u.full_name AS user_name, u.email AS user_email FROM events e JOIN users u ON u.id = e.user_id WHERE e.user_id = $1 AND e.starts_at >= $2 AND e.starts_at <= $3 ORDER BY e.starts_at ASC', [tgt, start, end]);
+      } else if (claimId) {
+        rows = await q('SELECT e.*, u.full_name AS user_name, u.email AS user_email FROM events e JOIN users u ON u.id = e.user_id WHERE u.org_id = $1 AND e.claim_local_id = $2 ORDER BY e.starts_at ASC', [req.user.org_id, claimId]);
+      } else {
+        rows = await q('SELECT e.*, u.full_name AS user_name, u.email AS user_email FROM events e JOIN users u ON u.id = e.user_id WHERE u.org_id = $1 AND e.starts_at >= $2 AND e.starts_at <= $3 ORDER BY e.starts_at ASC', [req.user.org_id, start, end]);
+      }
+    } else {
+      if (claimId) {
+        rows = await q('SELECT * FROM events WHERE user_id = $1 AND claim_local_id = $2 ORDER BY starts_at ASC', [req.user.id, claimId]);
+      } else {
+        rows = await q('SELECT * FROM events WHERE user_id = $1 AND starts_at >= $2 AND starts_at <= $3 ORDER BY starts_at ASC', [req.user.id, start, end]);
+      }
+    }
+    res.json({ events: rows });
+  } catch (err) {
+    console.error('[events GET]', err);
+    res.status(500).json({ error: 'list_failed', detail: err.message });
+  }
+});
+
+app.post('/events', requireAuth, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const title = ((b.title || '') + '').trim();
+    if (!title) return res.status(400).json({ error: 'title_required' });
+    if (!b.starts_at) return res.status(400).json({ error: 'starts_at_required' });
+    let userId = req.user.id;
+    if (b.assigned_to && req.user.org_id && req.user.org_role === 'owner') {
+      const tgt = parseInt(b.assigned_to);
+      if (tgt) {
+        const m = await one('SELECT id, org_id FROM users WHERE id = $1', [tgt]);
+        if (m && m.org_id === req.user.org_id) userId = tgt;
+      }
+    }
+    const ev = await one(
+      'INSERT INTO events (user_id, org_id, claim_local_id, title, description, starts_at, ends_at, all_day, location) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',
+      [userId, req.user.org_id || null, b.claim_local_id || null, title, b.description || null, b.starts_at, b.ends_at || null, !!b.all_day, b.location || null]
+    );
+    res.json({ ok: true, event: ev });
+  } catch (err) {
+    console.error('[events POST]', err);
+    res.status(500).json({ error: 'create_failed', detail: err.message });
+  }
+});
+
+app.patch('/events/:id', requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+    const ev = await one('SELECT * FROM events WHERE id = $1', [id]);
+    if (!ev) return res.status(404).json({ error: 'not_found' });
+    const isMine = ev.user_id === req.user.id;
+    const isMyTeam = ev.org_id && req.user.org_id === ev.org_id && req.user.org_role === 'owner';
+    if (!isMine && !isMyTeam) return res.status(403).json({ error: 'forbidden' });
+    const b = req.body || {};
+    const allowed = ['title', 'description', 'starts_at', 'ends_at', 'all_day', 'location', 'claim_local_id'];
+    const fields = Object.keys(b).filter(k => allowed.includes(k));
+    if (isMyTeam && b.assigned_to) {
+      const tgt = parseInt(b.assigned_to);
+      if (tgt) {
+        const m = await one('SELECT id, org_id FROM users WHERE id = $1', [tgt]);
+        if (m && m.org_id === req.user.org_id) {
+          fields.push('user_id');
+          b.user_id = tgt;
+        }
+      }
+    }
+    if (fields.length === 0) return res.status(400).json({ error: 'no_updatable_fields' });
+    const sets = fields.map(function(k, i) { return k + ' = ' + ('$' + (i + 2)); }).join(', ') + ', updated_at = now()';
+    const vals = fields.map(k => b[k]);
+    const updated = await one('UPDATE events SET ' + sets + ' WHERE id = $1 RETURNING *', [id, ...vals]);
+    res.json({ ok: true, event: updated });
+  } catch (err) {
+    console.error('[events PATCH]', err);
+    res.status(500).json({ error: 'update_failed', detail: err.message });
+  }
+});
+
+app.delete('/events/:id', requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+    const ev = await one('SELECT * FROM events WHERE id = $1', [id]);
+    if (!ev) return res.json({ ok: true });
+    const isMine = ev.user_id === req.user.id;
+    const isMyTeam = ev.org_id && req.user.org_id === ev.org_id && req.user.org_role === 'owner';
+    if (!isMine && !isMyTeam) return res.status(403).json({ error: 'forbidden' });
+    await q('DELETE FROM events WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[events DELETE]', err);
+    res.status(500).json({ error: 'delete_failed', detail: err.message });
+  }
+});
+
 app.patch('/me', requireAuth, async (req, res) => {
   const { full_name, license_number, firm_name } = req.body || {};
   await q(
@@ -1989,6 +2100,9 @@ async function boot() {
     try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS org_role TEXT"); } catch (e) {}
     try { await q("ALTER TABLE users ADD COLUMN IF NOT NULL DEFAULT true"); } catch (e) {}
     try { await q("ALTER TABLE org_invites ADD COLUMN IF NOT EXISTS email TEXT"); } catch (e) {}
+    try { await q("CREATE TABLE IF NOT EXISTS events (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, org_id INTEGER, claim_local_id TEXT, title TEXT NOT NULL, description TEXT, starts_at TIMESTAMPTZ NOT NULL, ends_at TIMESTAMPTZ, all_day BOOLEAN NOT NULL DEFAULT false, location TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"); } catch (e) { console.error('[boot] events table', e.message); }
+    try { await q("CREATE INDEX IF NOT EXISTS events_user_idx ON events (user_id, starts_at)"); } catch (e) {}
+    try { await q("CREATE INDEX IF NOT EXISTS events_org_idx ON events (org_id, starts_at)"); } catch (e) {}
     try { await q("CREATE TABLE IF NOT EXISTS cloud_jobs (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, job_id TEXT NOT NULL, name TEXT, payload TEXT, size_bytes INTEGER, updated_at TIMESTAMPTZ DEFAULT now())"); } catch (e) { console.error("[schema] cloud_jobs", e); }
     app.listen(port, () => {
       console.log(`[boot] HailGrade API listening on :${port}`);
