@@ -328,6 +328,8 @@ app.get('/org', requireAuth, async (req, res) => {
                 (SELECT COUNT(*) FROM analyses a WHERE a.user_id = u.id)::int AS analyses,
                 (SELECT COUNT(*) FROM contracts c WHERE c.user_id = u.id)::int AS contracts_sent,
                 (SELECT COUNT(*) FROM contracts c WHERE c.user_id = u.id AND c.status IN ('signed','complete','completed'))::int AS contracts_signed,
+                (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id)::int AS leads_assigned,
+                (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id AND l.status = 'converted')::int AS leads_converted,
                 GREATEST(
                   COALESCE((SELECT MAX(created_at) FROM analyses a WHERE a.user_id = u.id), 'epoch'),
                   COALESCE((SELECT MAX(created_at) FROM contracts c WHERE c.user_id = u.id), 'epoch')
@@ -602,6 +604,150 @@ app.delete('/events/:id', requireAuth, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('[events DELETE]', err);
+    res.status(500).json({ error: 'delete_failed', detail: err.message });
+  }
+});
+
+// ============ Leads (sales pipeline) ============
+
+// GET /leads  - list leads. Owner sees all org leads; member sees own assigned; solo sees self-created.
+// Filters: ?status=new|assigned|contacted|converted|lost  ?assigned=user_id|me|unassigned|all
+app.get('/leads', requireAuth, async (req, res) => {
+  try {
+    const isOwner = req.user.org_id && req.user.org_role === 'owner';
+    const wh = []; const params = []; let pn = 1;
+    if (req.user.org_id) {
+      wh.push('l.org_id = ' + ('$' + (pn++)));
+      params.push(req.user.org_id);
+      if (!isOwner) {
+        wh.push('l.assigned_to = ' + ('$' + (pn++)));
+        params.push(req.user.id);
+      } else {
+        const a = req.query.assigned;
+        if (a === 'unassigned') wh.push('l.assigned_to IS NULL');
+        else if (a === 'me') { wh.push('l.assigned_to = ' + ('$' + (pn++))); params.push(req.user.id); }
+        else if (a && a !== 'all') { wh.push('l.assigned_to = ' + ('$' + (pn++))); params.push(parseInt(a)); }
+      }
+    } else {
+      wh.push('l.created_by = ' + ('$' + (pn++)));
+      params.push(req.user.id);
+    }
+    if (req.query.status) { wh.push('l.status = ' + ('$' + (pn++))); params.push(req.query.status); }
+    const sql = 'SELECT l.*, u.full_name AS assignee_name, u.email AS assignee_email FROM leads l LEFT JOIN users u ON u.id = l.assigned_to WHERE ' + wh.join(' AND ') + ' ORDER BY l.created_at DESC LIMIT 200';
+    const rows = await q(sql, params);
+    res.json({ leads: rows });
+  } catch (err) {
+    console.error('[leads GET]', err);
+    res.status(500).json({ error: 'list_failed', detail: err.message });
+  }
+});
+
+// POST /leads  - create a lead. Owner can pre-assign by passing assigned_to.
+app.post('/leads', requireAuth, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const name = ((b.name || '') + '').trim();
+    if (!name) return res.status(400).json({ error: 'name_required' });
+    const orgId = req.user.org_id || null;
+    let assignedTo = null, assignedAt = null, assignedBy = null;
+    const isOwner = orgId && req.user.org_role === 'owner';
+    if (b.assigned_to && isOwner) {
+      const tgt = parseInt(b.assigned_to);
+      if (tgt) {
+        const m = await one('SELECT id, org_id FROM users WHERE id = ' + '$1', [tgt]);
+        if (m && m.org_id === orgId) { assignedTo = tgt; assignedAt = new Date().toISOString(); assignedBy = req.user.id; }
+      }
+    } else if (!orgId) {
+      // Solo user: auto-assign to self
+      assignedTo = req.user.id; assignedAt = new Date().toISOString(); assignedBy = req.user.id;
+    }
+    const status = assignedTo ? 'assigned' : 'new';
+    const lead = await one(
+      'INSERT INTO leads (org_id, name, email, phone, address, carrier, claim_number, source, notes, assigned_to, assigned_at, assigned_by, status, created_by) VALUES (' + '$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *',
+      [orgId, name, b.email || null, b.phone || null, b.address || null, b.carrier || null, b.claim_number || null, b.source || null, b.notes || null, assignedTo, assignedAt, assignedBy, status, req.user.id]
+    );
+    res.json({ ok: true, lead });
+  } catch (err) {
+    console.error('[leads POST]', err);
+    res.status(500).json({ error: 'create_failed', detail: err.message });
+  }
+});
+
+// PATCH /leads/:id  - update fields, status, or (owner only) reassign.
+app.patch('/leads/:id', requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+    const lead = await one('SELECT * FROM leads WHERE id = ' + '$1', [id]);
+    if (!lead) return res.status(404).json({ error: 'not_found' });
+    const isOwner = req.user.org_id && req.user.org_role === 'owner';
+    const sameOrg = lead.org_id && lead.org_id === req.user.org_id;
+    const isMyLead = lead.assigned_to === req.user.id || lead.created_by === req.user.id;
+    if (!(isOwner && sameOrg) && !isMyLead) return res.status(403).json({ error: 'forbidden' });
+    const b = req.body || {};
+    const allowed = ['name', 'email', 'phone', 'address', 'carrier', 'claim_number', 'source', 'notes', 'status'];
+    const fields = Object.keys(b).filter(k => allowed.includes(k));
+    if (isOwner && sameOrg && Object.prototype.hasOwnProperty.call(b, 'assigned_to')) {
+      const tgt = b.assigned_to ? parseInt(b.assigned_to) : null;
+      if (tgt) {
+        const m = await one('SELECT id, org_id FROM users WHERE id = ' + '$1', [tgt]);
+        if (m && m.org_id === req.user.org_id) {
+          fields.push('assigned_to', 'assigned_at', 'assigned_by');
+          b.assigned_to = tgt; b.assigned_at = new Date().toISOString(); b.assigned_by = req.user.id;
+          if (!('status' in b) || !b.status) { fields.push('status'); b.status = 'assigned'; }
+        }
+      } else {
+        fields.push('assigned_to', 'assigned_at', 'assigned_by');
+        b.assigned_to = null; b.assigned_at = null; b.assigned_by = null;
+      }
+    }
+    if (fields.length === 0) return res.status(400).json({ error: 'no_updatable_fields' });
+    const sets = fields.map((k, i) => k + ' = ' + ('$' + (i + 2))).join(', ') + ', updated_at = now()';
+    const vals = fields.map(k => b[k]);
+    const updated = await one('UPDATE leads SET ' + sets + ' WHERE id = ' + '$1' + ' RETURNING *', [id, ...vals]);
+    res.json({ ok: true, lead: updated });
+  } catch (err) {
+    console.error('[leads PATCH]', err);
+    res.status(500).json({ error: 'update_failed', detail: err.message });
+  }
+});
+
+// POST /leads/:id/convert  - mark lead as converted, optionally link to a local job id.
+app.post('/leads/:id/convert', requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+    const lead = await one('SELECT * FROM leads WHERE id = ' + '$1', [id]);
+    if (!lead) return res.status(404).json({ error: 'not_found' });
+    const isOwner = req.user.org_id && req.user.org_role === 'owner';
+    const sameOrg = lead.org_id && lead.org_id === req.user.org_id;
+    const isMyLead = lead.assigned_to === req.user.id || lead.created_by === req.user.id;
+    if (!(isOwner && sameOrg) && !isMyLead) return res.status(403).json({ error: 'forbidden' });
+    const claimLocalId = (req.body && req.body.claim_local_id) || null;
+    await q('UPDATE leads SET status = ' + "'converted'" + ', converted_claim_local_id = ' + '$1' + ', converted_at = now(), converted_by = ' + '$2' + ', updated_at = now() WHERE id = ' + '$3',
+      [claimLocalId, req.user.id, id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[leads convert]', err);
+    res.status(500).json({ error: 'convert_failed', detail: err.message });
+  }
+});
+
+// DELETE /leads/:id
+app.delete('/leads/:id', requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+    const lead = await one('SELECT * FROM leads WHERE id = ' + '$1', [id]);
+    if (!lead) return res.json({ ok: true });
+    const isOwner = req.user.org_id && req.user.org_role === 'owner';
+    const sameOrg = lead.org_id && lead.org_id === req.user.org_id;
+    const isMine = lead.created_by === req.user.id;
+    if (!(isOwner && sameOrg) && !isMine) return res.status(403).json({ error: 'forbidden' });
+    await q('DELETE FROM leads WHERE id = ' + '$1', [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[leads DELETE]', err);
     res.status(500).json({ error: 'delete_failed', detail: err.message });
   }
 });
@@ -2103,6 +2249,9 @@ async function boot() {
     try { await q("CREATE TABLE IF NOT EXISTS events (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, org_id INTEGER, claim_local_id TEXT, title TEXT NOT NULL, description TEXT, starts_at TIMESTAMPTZ NOT NULL, ends_at TIMESTAMPTZ, all_day BOOLEAN NOT NULL DEFAULT false, location TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"); } catch (e) { console.error('[boot] events table', e.message); }
     try { await q("CREATE INDEX IF NOT EXISTS events_user_idx ON events (user_id, starts_at)"); } catch (e) {}
     try { await q("CREATE INDEX IF NOT EXISTS events_org_idx ON events (org_id, starts_at)"); } catch (e) {}
+    try { await q("CREATE TABLE IF NOT EXISTS leads (id SERIAL PRIMARY KEY, org_id INTEGER, name TEXT NOT NULL, email TEXT, phone TEXT, address TEXT, carrier TEXT, claim_number TEXT, source TEXT, notes TEXT, assigned_to INTEGER, assigned_at TIMESTAMPTZ, assigned_by INTEGER, status TEXT NOT NULL DEFAULT 'new', converted_claim_local_id TEXT, converted_at TIMESTAMPTZ, converted_by INTEGER, created_by INTEGER NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"); } catch (e) { console.error('[boot] leads table', e.message); }
+    try { await q("CREATE INDEX IF NOT EXISTS leads_org_idx ON leads (org_id, status, created_at DESC)"); } catch (e) {}
+    try { await q("CREATE INDEX IF NOT EXISTS leads_assigned_idx ON leads (assigned_to, status)"); } catch (e) {}
     try { await q("CREATE TABLE IF NOT EXISTS cloud_jobs (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, job_id TEXT NOT NULL, name TEXT, payload TEXT, size_bytes INTEGER, updated_at TIMESTAMPTZ DEFAULT now())"); } catch (e) { console.error("[schema] cloud_jobs", e); }
     app.listen(port, () => {
       console.log(`[boot] HailGrade API listening on :${port}`);
