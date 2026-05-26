@@ -285,6 +285,205 @@ app.get('/admin/analyses', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
+// ============ Organizations (master / enterprise accounts) ============
+// An org has one owner and any number of members. The owner generates invite
+// codes; members join with a code. The owner gets a team activity dashboard,
+// can deactivate accounts, and can transfer a departed member's workflow to a
+// newly hired account.
+
+function makeInviteCode() {
+  const abc = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous chars
+  let s = '';
+  for (let i = 0; i < 7; i++) s += abc[Math.floor(Math.random() * abc.length)];
+  return 'HG-' + s;
+}
+
+async function loadOrgContext(userId) {
+  const u = await one('SELECT id, org_id, org_role FROM users WHERE id = $1', [userId]);
+  if (!u || !u.org_id) return { org: null, role: null };
+  const org = await one('SELECT id, name, owner_user_id, created_at FROM orgs WHERE id = $1', [u.org_id]);
+  if (!org) return { org: null, role: null };
+  return { org, role: u.org_role || 'member' };
+}
+
+// GET /org — current user's org state. Owners also get members (with stats) + invites.
+app.get('/org', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadOrgContext(req.user.id);
+    if (!ctx.org) return res.json({ org: null, role: null });
+    const out = { org: { id: ctx.org.id, name: ctx.org.name, created_at: ctx.org.created_at }, role: ctx.role };
+    if (ctx.role === 'owner') {
+      out.members = await q(
+        `SELECT u.id, u.email, u.full_name, u.org_role, u.active, u.created_at,
+                (SELECT COUNT(*) FROM analyses a WHERE a.user_id = u.id)::int AS analyses,
+                (SELECT COUNT(*) FROM contracts c WHERE c.user_id = u.id)::int AS contracts_sent,
+                (SELECT COUNT(*) FROM contracts c WHERE c.user_id = u.id AND c.status IN ('signed','complete','completed'))::int AS contracts_signed,
+                GREATEST(
+                  COALESCE((SELECT MAX(created_at) FROM analyses a WHERE a.user_id = u.id), 'epoch'),
+                  COALESCE((SELECT MAX(created_at) FROM contracts c WHERE c.user_id = u.id), 'epoch')
+                ) AS last_activity
+         FROM users u WHERE u.org_id = $1
+         ORDER BY (u.org_role = 'owner') DESC, u.created_at ASC`,
+        [ctx.org.id]
+      );
+      out.invites = await q(
+        `SELECT id, code, label, created_at, used_by, used_at, revoked
+         FROM org_invites WHERE org_id = $1 ORDER BY created_at DESC`,
+        [ctx.org.id]
+      );
+    }
+    res.json(out);
+  } catch (err) {
+    console.error('[org GET]', err);
+    res.status(500).json({ error: 'org_failed', detail: err.message });
+  }
+});
+
+// POST /org/create — caller becomes the owner of a new org.
+app.post('/org/create', requireAuth, async (req, res) => {
+  try {
+    const name = ((req.body && req.body.name) || '').trim();
+    if (!name) return res.status(400).json({ error: 'name_required' });
+    const me = await one('SELECT org_id FROM users WHERE id = $1', [req.user.id]);
+    if (me && me.org_id) return res.status(409).json({ error: 'already_in_org' });
+    const org = await one(
+      'INSERT INTO orgs (name, owner_user_id) VALUES ($1, $2) RETURNING id, name, created_at',
+      [name, req.user.id]
+    );
+    await q("UPDATE users SET org_id = $1, org_role = 'owner' WHERE id = $2", [org.id, req.user.id]);
+    res.json({ ok: true, org });
+  } catch (err) {
+    console.error('[org/create]', err);
+    res.status(500).json({ error: 'create_failed', detail: err.message });
+  }
+});
+
+// POST /org/invite — owner generates a join code.
+app.post('/org/invite', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadOrgContext(req.user.id);
+    if (!ctx.org || ctx.role !== 'owner') return res.status(403).json({ error: 'owner_only' });
+    const label = (((req.body && req.body.label) || '').trim()) || null;
+    let inserted = null;
+    for (let attempt = 0; attempt < 6 && !inserted; attempt++) {
+      try {
+        inserted = await one(
+          'INSERT INTO org_invites (org_id, code, label, created_by) VALUES ($1,$2,$3,$4) RETURNING id, code, label, created_at, used_by, used_at, revoked',
+          [ctx.org.id, makeInviteCode(), label, req.user.id]
+        );
+      } catch (e) { inserted = null; }
+    }
+    if (!inserted) return res.status(500).json({ error: 'code_generation_failed' });
+    res.json({ ok: true, invite: inserted });
+  } catch (err) {
+    console.error('[org/invite]', err);
+    res.status(500).json({ error: 'invite_failed', detail: err.message });
+  }
+});
+
+// POST /org/invite/:id/revoke — owner revokes a code.
+app.post('/org/invite/:id/revoke', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadOrgContext(req.user.id);
+    if (!ctx.org || ctx.role !== 'owner') return res.status(403).json({ error: 'owner_only' });
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+    await q('UPDATE org_invites SET revoked = true WHERE id = $1 AND org_id = $2', [id, ctx.org.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[org/invite revoke]', err);
+    res.status(500).json({ error: 'revoke_failed', detail: err.message });
+  }
+});
+
+// POST /org/join — member joins via invite code.
+app.post('/org/join', requireAuth, async (req, res) => {
+  try {
+    const raw = (((req.body && req.body.code) || '').trim()).toUpperCase();
+    if (!raw) return res.status(400).json({ error: 'code_required' });
+    const me = await one('SELECT org_id FROM users WHERE id = $1', [req.user.id]);
+    if (me && me.org_id) return res.status(409).json({ error: 'already_in_org' });
+    const invite = await one('SELECT * FROM org_invites WHERE upper(code) = $1', [raw]);
+    if (!invite) return res.status(404).json({ error: 'invalid_code' });
+    if (invite.revoked) return res.status(410).json({ error: 'code_revoked' });
+    if (invite.used_by) return res.status(410).json({ error: 'code_used' });
+    const org = await one('SELECT id, name FROM orgs WHERE id = $1', [invite.org_id]);
+    if (!org) return res.status(404).json({ error: 'org_not_found' });
+    await q("UPDATE users SET org_id = $1, org_role = 'member' WHERE id = $2", [org.id, req.user.id]);
+    await q('UPDATE org_invites SET used_by = $1, used_at = now() WHERE id = $2', [req.user.id, invite.id]);
+    res.json({ ok: true, org });
+  } catch (err) {
+    console.error('[org/join]', err);
+    res.status(500).json({ error: 'join_failed', detail: err.message });
+  }
+});
+
+// POST /org/member/:id/deactivate — owner disables a member account.
+app.post('/org/member/:id/deactivate', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadOrgContext(req.user.id);
+    if (!ctx.org || ctx.role !== 'owner') return res.status(403).json({ error: 'owner_only' });
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+    if (id === req.user.id) return res.status(400).json({ error: 'cannot_deactivate_self' });
+    const target = await one('SELECT id, org_id FROM users WHERE id = $1', [id]);
+    if (!target || target.org_id !== ctx.org.id) return res.status(404).json({ error: 'not_in_org' });
+    await q('UPDATE users SET active = false WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[org/member deactivate]', err);
+    res.status(500).json({ error: 'deactivate_failed', detail: err.message });
+  }
+});
+
+// POST /org/member/:id/reactivate — owner re-enables a member account.
+app.post('/org/member/:id/reactivate', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadOrgContext(req.user.id);
+    if (!ctx.org || ctx.role !== 'owner') return res.status(403).json({ error: 'owner_only' });
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'bad_id' });
+    const target = await one('SELECT id, org_id FROM users WHERE id = $1', [id]);
+    if (!target || target.org_id !== ctx.org.id) return res.status(404).json({ error: 'not_in_org' });
+    await q('UPDATE users SET active = true WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[org/member reactivate]', err);
+    res.status(500).json({ error: 'reactivate_failed', detail: err.message });
+  }
+});
+
+// POST /org/transfer — move a departed member's workflow to a new hire.
+app.post('/org/transfer', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadOrgContext(req.user.id);
+    if (!ctx.org || ctx.role !== 'owner') return res.status(403).json({ error: 'owner_only' });
+    const fromId = parseInt(req.body && req.body.from_user_id);
+    const toId = parseInt(req.body && req.body.to_user_id);
+    const deactivateSource = !!(req.body && req.body.deactivate_source);
+    if (!fromId || !toId) return res.status(400).json({ error: 'from_and_to_required' });
+    if (fromId === toId) return res.status(400).json({ error: 'same_account' });
+    const from = await one('SELECT id, org_id FROM users WHERE id = $1', [fromId]);
+    const to = await one('SELECT id, org_id FROM users WHERE id = $1', [toId]);
+    if (!from || from.org_id !== ctx.org.id) return res.status(404).json({ error: 'from_not_in_org' });
+    if (!to || to.org_id !== ctx.org.id) return res.status(404).json({ error: 'to_not_in_org' });
+    const moved = {};
+    for (const table of ['analyses', 'findings', 'contracts', 'user_contracts', 'cloud_jobs']) {
+      try {
+        const rows = await q('UPDATE ' + table + ' SET user_id = $1 WHERE user_id = $2 RETURNING id', [toId, fromId]);
+        moved[table] = rows.length;
+      } catch (e) { moved[table] = 'skipped'; }
+    }
+    if (deactivateSource && fromId !== req.user.id) {
+      await q('UPDATE users SET active = false WHERE id = $1', [fromId]);
+      moved.source_deactivated = true;
+    }
+    res.json({ ok: true, moved });
+  } catch (err) {
+    console.error('[org/transfer]', err);
+    res.status(500).json({ error: 'transfer_failed', detail: err.message });
+  }
+});
 app.patch('/me', requireAuth, async (req, res) => {
   const { full_name, license_number, firm_name } = req.body || {};
   await q(
@@ -1767,6 +1966,11 @@ If the roof is in normal condition with no specific damage indicators visible: s
 async function boot() {
   try {
     await ensureSchema();
+    try { await q("CREATE TABLE IF NOT EXISTS orgs (id SERIAL PRIMARY KEY, name TEXT NOT NULL, owner_user_id INTEGER NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())"); } catch (e) { console.error('[boot] orgs table', e.message); }
+    try { await q("CREATE TABLE IF NOT EXISTS org_invites (id SERIAL PRIMARY KEY, org_id INTEGER NOT NULL, code TEXT UNIQUE NOT NULL, label TEXT, created_by INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), used_by INTEGER, used_at TIMESTAMPTZ, revoked BOOLEAN NOT NULL DEFAULT false)"); } catch (e) { console.error('[boot] org_invites table', e.message); }
+    try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER"); } catch (e) {}
+    try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS org_role TEXT"); } catch (e) {}
+    try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true"); } catch (e) {}
     try { await q("CREATE TABLE IF NOT EXISTS cloud_jobs (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, job_id TEXT NOT NULL, name TEXT, payload TEXT, size_bytes INTEGER, updated_at TIMESTAMPTZ DEFAULT now())"); } catch (e) { console.error("[schema] cloud_jobs", e); }
     app.listen(port, () => {
       console.log(`[boot] HailGrade API listening on :${port}`);
