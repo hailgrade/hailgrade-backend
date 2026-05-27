@@ -32,6 +32,9 @@ const port = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = [
   'https://hailgrade.com',
   'https://www.hailgrade.com',
+  'https://ampleclaim.com',
+  'https://www.ampleclaim.com',
+  'https://helpful-gecko-1923b8.netlify.app',
   'http://localhost:5173',
   'http://localhost:8080'
 ];
