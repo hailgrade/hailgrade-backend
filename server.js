@@ -756,6 +756,85 @@ app.delete('/leads/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ============ ClaimWizard webhook (Zapier-driven) ============
+// One-way sync from ClaimWizard into Ample as new Leads.
+// Setup: in Zapier, create a Zap with ClaimWizard "New Client Added" trigger,
+// then Action = Webhooks by Zapier (POST) to this URL with the client fields.
+// Auth: a shared secret in the URL path. Set ZAPIER_WEBHOOK_SECRET on Render.
+// Owner mapping: leads are created under the user whose email matches
+// ZAPIER_USER_EMAIL (defaults to claims@smithadjusters.com).
+const ZAPIER_WEBHOOK_SECRET = (process.env.ZAPIER_WEBHOOK_SECRET || '').trim();
+const ZAPIER_USER_EMAIL = (process.env.ZAPIER_USER_EMAIL || 'claims@smithadjusters.com').trim().toLowerCase();
+
+app.post('/webhooks/zapier/claimwizard/:secret', async (req, res) => {
+  try {
+    if (!ZAPIER_WEBHOOK_SECRET) {
+      return res.status(503).json({ error: 'webhook not configured' });
+    }
+    if (req.params.secret !== ZAPIER_WEBHOOK_SECRET) {
+      return res.status(401).json({ error: 'invalid secret' });
+    }
+
+    // Owner lookup — by configured email so we don't need a per-user token yet
+    const ur = await pool.query(
+      "SELECT id, org_id FROM users WHERE LOWER(email) = $1 LIMIT 1",
+      [ZAPIER_USER_EMAIL]
+    );
+    if (!ur.rowCount) return res.status(500).json({ error: 'configured user not found' });
+    const userId = ur.rows[0].id;
+    const orgId = ur.rows[0].org_id || null;
+
+    // Field mapping — Zapier lets the user map ClaimWizard fields to whatever
+    // keys they want, so we accept many common variants for each field.
+    const b = req.body || {};
+    const pickStr = (...keys) => {
+      for (const k of keys) {
+        const v = b[k];
+        if (v !== undefined && v !== null && String(v).trim() !== '') {
+          return String(v).trim();
+        }
+      }
+      return '';
+    };
+    const composedName = (function() {
+      const f = pickStr('first_name', 'firstName', 'first');
+      const l = pickStr('last_name', 'lastName', 'last');
+      return (f || l) ? (f + (f && l ? ' ' : '') + l) : '';
+    })();
+    const name = (pickStr('name', 'client_name', 'full_name', 'fullName', 'policyholder', 'policy_holder') || composedName || 'Synced client').slice(0, 200);
+    const email = (pickStr('email', 'client_email', 'policyholder_email', 'primary_email') || null);
+    const phone = (pickStr('phone', 'phone_number', 'phoneNumber', 'mobile', 'cell', 'primary_phone') || null);
+    const addressLine = pickStr('address', 'address1', 'street', 'street_address', 'property_address');
+    const city = pickStr('city', 'property_city');
+    const state = pickStr('state', 'property_state', 'region');
+    const zip = pickStr('zip', 'zip_code', 'zipcode', 'postal_code', 'postcode');
+    const fullAddress = [addressLine, city, state, zip].filter(Boolean).join(', ') || null;
+    const carrier = pickStr('carrier', 'insurance_company', 'insurer', 'company') || null;
+    const claimNumber = pickStr('claim_number', 'claim_no', 'claimNumber', 'claim_id') || null;
+    const notesIn = pickStr('notes', 'note', 'description', 'remarks') || null;
+
+    const ins = await pool.query(
+      `INSERT INTO leads (org_id, assigned_to, name, email, phone, address, carrier, claim_number, source, status, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'new', $10) RETURNING id`,
+      [orgId, userId, name, email, phone, fullAddress, carrier, claimNumber, 'ClaimWizard sync', notesIn]
+    );
+
+    return res.status(201).json({ ok: true, lead_id: ins.rows[0].id, name });
+  } catch (err) {
+    console.error('[zapier:claimwizard]', err);
+    return res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+// Health/ping for Zapier setup — the user can use this to verify the URL works
+// without actually creating a lead.
+app.get('/webhooks/zapier/claimwizard/:secret/ping', (req, res) => {
+  if (!ZAPIER_WEBHOOK_SECRET) return res.status(503).json({ ok: false, error: 'webhook not configured' });
+  if (req.params.secret !== ZAPIER_WEBHOOK_SECRET) return res.status(401).json({ ok: false, error: 'invalid secret' });
+  return res.json({ ok: true, message: 'Webhook URL is valid — point Zapier here.', at: new Date().toISOString() });
+});
+
+
 // ============ Team jobs (master account aggregated pipeline) ============
 // Each member's device auto-syncs a denormalized snapshot of their local jobs.
 // Owner reads the aggregated view to see where every deal sits.
