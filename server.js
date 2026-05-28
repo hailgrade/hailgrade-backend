@@ -831,332 +831,7 @@ app.post('/webhooks/zapier/claimwizard/:secret', async (req, res) => {
 app.get('/webhooks/zapier/claimwizard/:secret/ping', (req, res) => {
   if (!ZAPIER_WEBHOOK_SECRET) return res.status(503).json({ ok: false, error: 'webhook not configured' });
 
-// ============ Google OAuth + Gmail + Calendar ============
-// One-time schema extension for the users table to hold Google OAuth tokens.
-(async () => {
-  try {
-    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_access_token TEXT");
-    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT");
-    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_token_expiry BIGINT");
-    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email TEXT");
-    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_scopes TEXT");
-    console.log('[google] users table extended for Google tokens');
-  } catch (e) {
-    console.error('[google schema]', e && e.message);
-  }
-})();
 
-const GOOGLE_OAUTH_CLIENT_ID = (process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
-const GOOGLE_OAUTH_CLIENT_SECRET = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
-const GOOGLE_OAUTH_REDIRECT_URI = (process.env.GOOGLE_OAUTH_REDIRECT_URI ||
-  'https://hailgrade-backend.onrender.com/auth/google/callback').trim();
-const GOOGLE_OAUTH_SCOPES = [
-  'openid',
-  'email',
-  'profile',
-  'https://www.googleapis.com/auth/gmail.readonly',
-  'https://www.googleapis.com/auth/calendar',
-];
-const GOOGLE_OAUTH_FRONTEND_RETURN = (process.env.GOOGLE_OAUTH_FRONTEND_RETURN ||
-  'https://ampleclaim.com').trim();
-
-// In-memory state map for CSRF protection on the OAuth dance. Single-instance only.
-// Each entry expires 10 minutes after creation.
-const _googleStates = new Map();
-function _makeGoogleState(uid) {
-  const s = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) +
-            Math.random().toString(36).slice(2);
-  _googleStates.set(s, { userId: uid, expires: Date.now() + 10 * 60 * 1000 });
-  // Garbage-collect expired entries opportunistically
-  for (const [k, v] of _googleStates.entries()) {
-    if (v.expires < Date.now()) _googleStates.delete(k);
-  }
-  return s;
-}
-function _consumeGoogleState(s) {
-  const e = _googleStates.get(s);
-  if (!e) return null;
-  _googleStates.delete(s);
-  if (e.expires < Date.now()) return null;
-  return { id: e.userId };
-}
-
-// Returns a valid access token for this user. Refreshes if expired.
-async function googleAccessToken(userId) {
-  const ur = await pool.query(
-    "SELECT google_access_token, google_refresh_token, google_token_expiry FROM users WHERE id = $1",
-    [userId]
-  );
-  if (!ur.rowCount) throw new Error('user not found');
-  let { google_access_token: accessToken,
-        google_refresh_token: refreshToken,
-        google_token_expiry: expiry } = ur.rows[0];
-  if (!refreshToken) throw new Error('Google account not connected');
-  // Reuse current token if it still has 60+ seconds left
-  if (accessToken && expiry && (Number(expiry) - 60000) > Date.now()) return accessToken;
-  // Otherwise refresh
-  const refRes = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: GOOGLE_OAUTH_CLIENT_ID,
-      client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
-      refresh_token: refreshToken,
-      grant_type: 'refresh_token'
-    })
-  });
-  const td = await refRes.json();
-  if (!refRes.ok) throw new Error('refresh failed: ' + JSON.stringify(td).slice(0, 200));
-  accessToken = td.access_token;
-  const newExpiry = Date.now() + (td.expires_in || 3500) * 1000;
-  await pool.query(
-    "UPDATE users SET google_access_token = $1, google_token_expiry = $2 WHERE id = $3",
-    [accessToken, newExpiry, userId]
-  );
-  return accessToken;
-}
-
-// Start the OAuth flow. Frontend hits this with the user's session token,
-// gets back a URL, and redirects the user to it.
-app.get('/auth/google/connect', requireAuth, (req, res) => {
-  if (!GOOGLE_OAUTH_CLIENT_ID || !GOOGLE_OAUTH_CLIENT_SECRET) {
-    return res.status(503).json({ error: 'Google OAuth not configured on this server' });
-  }
-  const state = _makeGoogleState(req.user.id);
-  const params = new URLSearchParams({
-    client_id: GOOGLE_OAUTH_CLIENT_ID,
-    redirect_uri: GOOGLE_OAUTH_REDIRECT_URI,
-    response_type: 'code',
-    scope: GOOGLE_OAUTH_SCOPES.join(' '),
-    access_type: 'offline',
-    prompt: 'consent',
-    include_granted_scopes: 'true',
-    state: state
-  });
-  return res.json({ url: 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString() });
-});
-
-// Google redirects back here with ?code=... &state=...
-app.get('/auth/google/callback', async (req, res) => {
-  try {
-    const { code, state, error } = req.query;
-    const back = (status, reason) =>
-      res.redirect(GOOGLE_OAUTH_FRONTEND_RETURN + '/?google=' + status +
-        (reason ? '&reason=' + encodeURIComponent(String(reason)) : ''));
-    if (error) return back('error', error);
-    if (!code || !state) return res.status(400).send('Missing code or state');
-    const dec = _consumeGoogleState(String(state));
-    if (!dec) return back('error', 'invalid_state');
-    const userId = dec.id;
-
-    // Exchange the code for tokens
-    const tokRes = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        code: String(code),
-        client_id: GOOGLE_OAUTH_CLIENT_ID,
-        client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
-        redirect_uri: GOOGLE_OAUTH_REDIRECT_URI,
-        grant_type: 'authorization_code'
-      })
-    });
-    const td = await tokRes.json();
-    if (!tokRes.ok) {
-      console.error('[google callback]', td);
-      return back('error', 'token_exchange');
-    }
-
-    // Get the Gmail address the user authorized
-    let email = null;
-    try {
-      if (td.id_token) {
-        const parts = td.id_token.split('.');
-        if (parts.length === 3) {
-          const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-          email = payload.email || null;
-        }
-      }
-    } catch (e) { /* ignore */ }
-    if (!email && td.access_token) {
-      try {
-        const ui = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-          headers: { 'Authorization': 'Bearer ' + td.access_token }
-        });
-        const uid = await ui.json();
-        email = uid.email || null;
-      } catch (e) { /* ignore */ }
-    }
-
-    const expiry = Date.now() + (td.expires_in || 3500) * 1000;
-    await pool.query(
-      "UPDATE users SET google_access_token = $1, " +
-      "google_refresh_token = COALESCE($2, google_refresh_token), " +
-      "google_token_expiry = $3, google_email = $4, google_scopes = $5 WHERE id = $6",
-      [td.access_token, td.refresh_token || null, expiry, email, td.scope || null, userId]
-    );
-
-    return back('ok', email || '');
-  } catch (e) {
-    console.error('[google callback]', e);
-    return res.status(500).send('Callback failed: ' + String(e && e.message || e).slice(0, 200));
-  }
-});
-
-// Is the current user connected? Used by frontend to show the Connect/Disconnect button.
-app.get('/me/google', requireAuth, async (req, res) => {
-  const r = await pool.query(
-    "SELECT google_email, (google_refresh_token IS NOT NULL) AS connected FROM users WHERE id = $1",
-    [req.user.id]
-  );
-  if (!r.rowCount) return res.json({ connected: false });
-  return res.json({
-    connected: !!r.rows[0].connected,
-    email: r.rows[0].google_email || null
-  });
-});
-
-// Disconnect — clears all Google tokens for the user.
-app.delete('/me/google', requireAuth, async (req, res) => {
-  await pool.query(
-    "UPDATE users SET google_access_token = NULL, google_refresh_token = NULL, " +
-    "google_token_expiry = NULL, google_email = NULL, google_scopes = NULL WHERE id = $1",
-    [req.user.id]
-  );
-  return res.json({ ok: true });
-});
-
-// Gmail search. Accepts either ?q=<raw_gmail_query> or a set of claim fields
-// (name, address, email, claim_number) and constructs an OR query from them.
-app.get('/gmail/search', requireAuth, async (req, res) => {
-  try {
-    const token = await googleAccessToken(req.user.id);
-    let q = String(req.query.q || '').trim();
-    if (!q) {
-      const parts = [];
-      const esc = (s) => '"' + String(s).replace(/"/g, '') + '"';
-      if (req.query.name)         parts.push(esc(req.query.name));
-      if (req.query.address)      parts.push(esc(req.query.address));
-      if (req.query.email)        parts.push('from:' + String(req.query.email));
-      if (req.query.claim_number) parts.push(esc(req.query.claim_number));
-      q = parts.join(' OR ');
-    }
-    if (!q) return res.json({ messages: [], query: '' });
-
-    const max = Math.min(parseInt(req.query.max) || 20, 50);
-    const listRes = await fetch(
-      'https://gmail.googleapis.com/gmail/v1/users/me/messages?q=' +
-      encodeURIComponent(q) + '&maxResults=' + max,
-      { headers: { 'Authorization': 'Bearer ' + token } }
-    );
-    const listData = await listRes.json();
-    if (!listRes.ok) return res.status(500).json({ error: 'gmail list failed', detail: listData });
-
-    const messages = [];
-    for (const m of (listData.messages || []).slice(0, max)) {
-      try {
-        const r = await fetch(
-          'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + m.id +
-          '?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date',
-          { headers: { 'Authorization': 'Bearer ' + token } }
-        );
-        const md = await r.json();
-        const headers = {};
-        ((md.payload && md.payload.headers) || []).forEach(h => { headers[h.name] = h.value; });
-        messages.push({
-          id: m.id,
-          threadId: m.threadId,
-          snippet: md.snippet || '',
-          from: headers.From || '',
-          to: headers.To || '',
-          subject: headers.Subject || '',
-          date: headers.Date || '',
-          labelIds: md.labelIds || []
-        });
-      } catch (e) { /* skip this message */ }
-    }
-    return res.json({ query: q, count: messages.length, messages });
-  } catch (e) {
-    return res.status(500).json({ error: String(e && e.message || e).slice(0, 200) });
-  }
-});
-
-// Calendar — list events on the primary calendar.
-app.get('/calendar/events', requireAuth, async (req, res) => {
-  try {
-    const token = await googleAccessToken(req.user.id);
-    const timeMin = req.query.timeMin || new Date().toISOString();
-    const timeMax = req.query.timeMax ||
-      new Date(Date.now() + 60 * 86400000).toISOString();
-    const url = 'https://www.googleapis.com/calendar/v3/calendars/primary/events?' +
-      new URLSearchParams({
-        timeMin, timeMax,
-        singleEvents: 'true',
-        orderBy: 'startTime',
-        maxResults: String(Math.min(parseInt(req.query.maxResults) || 50, 250))
-      }).toString();
-    const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
-    const data = await r.json();
-    if (!r.ok) return res.status(500).json({ error: 'calendar list failed', detail: data });
-    return res.json({ events: data.items || [] });
-  } catch (e) {
-    return res.status(500).json({ error: String(e && e.message || e).slice(0, 200) });
-  }
-});
-
-// Calendar — create an event.
-app.post('/calendar/events', requireAuth, async (req, res) => {
-  try {
-    const token = await googleAccessToken(req.user.id);
-    const r = await fetch(
-      'https://www.googleapis.com/calendar/v3/calendars/primary/events',
-      {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body || {})
-      }
-    );
-    const data = await r.json();
-    if (!r.ok) return res.status(500).json({ error: 'calendar create failed', detail: data });
-    return res.json({ event: data });
-  } catch (e) {
-    return res.status(500).json({ error: String(e && e.message || e).slice(0, 200) });
-  }
-});
-
-// Calendar — update an event.
-app.patch('/calendar/events/:id', requireAuth, async (req, res) => {
-  try {
-    const token = await googleAccessToken(req.user.id);
-    const r = await fetch(
-      'https://www.googleapis.com/calendar/v3/calendars/primary/events/' +
-      encodeURIComponent(req.params.id),
-      {
-        method: 'PATCH',
-        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body || {})
-      }
-    );
-    const data = await r.json();
-    if (!r.ok) return res.status(500).json({ error: 'calendar update failed', detail: data });
-    return res.json({ event: data });
-  } catch (e) {
-    return res.status(500).json({ error: String(e && e.message || e).slice(0, 200) });
-  }
-});
-
-// Calendar — delete an event.
-app.delete('/calendar/events/:id', requireAuth, async (req, res) => {
-  try {
-    const token = await googleAccessToken(req.user.id);
-    const r = await fetch(
-      'https://www.googleapis.com/calendar/v3/calendars/primary/events/' +
-      encodeURIComponent(req.params.id),
-      { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } }
-    );
-    if (!r.ok && r.status !== 204) {
-      const data = await r.json().catch(() => ({}));
-      return res.status(500).json({ error: 'calendar delete failed', detail: data });
     }
     return res.json({ ok: true });
   } catch (e) {
@@ -2743,6 +2418,332 @@ async function boot() {
     try { await q("CREATE INDEX IF NOT EXISTS team_jobs_org_idx ON team_jobs (org_id)"); } catch (e) {}
     try { await q("CREATE TABLE IF NOT EXISTS cloud_jobs (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, job_id TEXT NOT NULL, name TEXT, payload TEXT, size_bytes INTEGER, updated_at TIMESTAMPTZ DEFAULT now())"); } catch (e) { console.error("[schema] cloud_jobs", e); }
 
+// ============ Google OAuth + Gmail + Calendar ============
+// One-time schema extension for the users table to hold Google OAuth tokens.
+(async () => {
+  try {
+    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_access_token TEXT");
+    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT");
+    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_token_expiry BIGINT");
+    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email TEXT");
+    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_scopes TEXT");
+    console.log('[google] users table extended for Google tokens');
+  } catch (e) {
+    console.error('[google schema]', e && e.message);
+  }
+})();
+
+const GOOGLE_OAUTH_CLIENT_ID = (process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
+const GOOGLE_OAUTH_CLIENT_SECRET = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
+const GOOGLE_OAUTH_REDIRECT_URI = (process.env.GOOGLE_OAUTH_REDIRECT_URI ||
+  'https://hailgrade-backend.onrender.com/auth/google/callback').trim();
+const GOOGLE_OAUTH_SCOPES = [
+  'openid',
+  'email',
+  'profile',
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/calendar',
+];
+const GOOGLE_OAUTH_FRONTEND_RETURN = (process.env.GOOGLE_OAUTH_FRONTEND_RETURN ||
+  'https://ampleclaim.com').trim();
+
+// In-memory state map for CSRF protection on the OAuth dance. Single-instance only.
+// Each entry expires 10 minutes after creation.
+const _googleStates = new Map();
+function _makeGoogleState(uid) {
+  const s = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) +
+            Math.random().toString(36).slice(2);
+  _googleStates.set(s, { userId: uid, expires: Date.now() + 10 * 60 * 1000 });
+  // Garbage-collect expired entries opportunistically
+  for (const [k, v] of _googleStates.entries()) {
+    if (v.expires < Date.now()) _googleStates.delete(k);
+  }
+  return s;
+}
+function _consumeGoogleState(s) {
+  const e = _googleStates.get(s);
+  if (!e) return null;
+  _googleStates.delete(s);
+  if (e.expires < Date.now()) return null;
+  return { id: e.userId };
+}
+
+// Returns a valid access token for this user. Refreshes if expired.
+async function googleAccessToken(userId) {
+  const ur = await pool.query(
+    "SELECT google_access_token, google_refresh_token, google_token_expiry FROM users WHERE id = $1",
+    [userId]
+  );
+  if (!ur.rowCount) throw new Error('user not found');
+  let { google_access_token: accessToken,
+        google_refresh_token: refreshToken,
+        google_token_expiry: expiry } = ur.rows[0];
+  if (!refreshToken) throw new Error('Google account not connected');
+  // Reuse current token if it still has 60+ seconds left
+  if (accessToken && expiry && (Number(expiry) - 60000) > Date.now()) return accessToken;
+  // Otherwise refresh
+  const refRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: GOOGLE_OAUTH_CLIENT_ID,
+      client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token'
+    })
+  });
+  const td = await refRes.json();
+  if (!refRes.ok) throw new Error('refresh failed: ' + JSON.stringify(td).slice(0, 200));
+  accessToken = td.access_token;
+  const newExpiry = Date.now() + (td.expires_in || 3500) * 1000;
+  await pool.query(
+    "UPDATE users SET google_access_token = $1, google_token_expiry = $2 WHERE id = $3",
+    [accessToken, newExpiry, userId]
+  );
+  return accessToken;
+}
+
+// Start the OAuth flow. Frontend hits this with the user's session token,
+// gets back a URL, and redirects the user to it.
+app.get('/auth/google/connect', requireAuth, (req, res) => {
+  if (!GOOGLE_OAUTH_CLIENT_ID || !GOOGLE_OAUTH_CLIENT_SECRET) {
+    return res.status(503).json({ error: 'Google OAuth not configured on this server' });
+  }
+  const state = _makeGoogleState(req.user.id);
+  const params = new URLSearchParams({
+    client_id: GOOGLE_OAUTH_CLIENT_ID,
+    redirect_uri: GOOGLE_OAUTH_REDIRECT_URI,
+    response_type: 'code',
+    scope: GOOGLE_OAUTH_SCOPES.join(' '),
+    access_type: 'offline',
+    prompt: 'consent',
+    include_granted_scopes: 'true',
+    state: state
+  });
+  return res.json({ url: 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString() });
+});
+
+// Google redirects back here with ?code=... &state=...
+app.get('/auth/google/callback', async (req, res) => {
+  try {
+    const { code, state, error } = req.query;
+    const back = (status, reason) =>
+      res.redirect(GOOGLE_OAUTH_FRONTEND_RETURN + '/?google=' + status +
+        (reason ? '&reason=' + encodeURIComponent(String(reason)) : ''));
+    if (error) return back('error', error);
+    if (!code || !state) return res.status(400).send('Missing code or state');
+    const dec = _consumeGoogleState(String(state));
+    if (!dec) return back('error', 'invalid_state');
+    const userId = dec.id;
+
+    // Exchange the code for tokens
+    const tokRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code: String(code),
+        client_id: GOOGLE_OAUTH_CLIENT_ID,
+        client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
+        redirect_uri: GOOGLE_OAUTH_REDIRECT_URI,
+        grant_type: 'authorization_code'
+      })
+    });
+    const td = await tokRes.json();
+    if (!tokRes.ok) {
+      console.error('[google callback]', td);
+      return back('error', 'token_exchange');
+    }
+
+    // Get the Gmail address the user authorized
+    let email = null;
+    try {
+      if (td.id_token) {
+        const parts = td.id_token.split('.');
+        if (parts.length === 3) {
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+          email = payload.email || null;
+        }
+      }
+    } catch (e) { /* ignore */ }
+    if (!email && td.access_token) {
+      try {
+        const ui = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+          headers: { 'Authorization': 'Bearer ' + td.access_token }
+        });
+        const uid = await ui.json();
+        email = uid.email || null;
+      } catch (e) { /* ignore */ }
+    }
+
+    const expiry = Date.now() + (td.expires_in || 3500) * 1000;
+    await pool.query(
+      "UPDATE users SET google_access_token = $1, " +
+      "google_refresh_token = COALESCE($2, google_refresh_token), " +
+      "google_token_expiry = $3, google_email = $4, google_scopes = $5 WHERE id = $6",
+      [td.access_token, td.refresh_token || null, expiry, email, td.scope || null, userId]
+    );
+
+    return back('ok', email || '');
+  } catch (e) {
+    console.error('[google callback]', e);
+    return res.status(500).send('Callback failed: ' + String(e && e.message || e).slice(0, 200));
+  }
+});
+
+// Is the current user connected? Used by frontend to show the Connect/Disconnect button.
+app.get('/me/google', requireAuth, async (req, res) => {
+  const r = await pool.query(
+    "SELECT google_email, (google_refresh_token IS NOT NULL) AS connected FROM users WHERE id = $1",
+    [req.user.id]
+  );
+  if (!r.rowCount) return res.json({ connected: false });
+  return res.json({
+    connected: !!r.rows[0].connected,
+    email: r.rows[0].google_email || null
+  });
+});
+
+// Disconnect — clears all Google tokens for the user.
+app.delete('/me/google', requireAuth, async (req, res) => {
+  await pool.query(
+    "UPDATE users SET google_access_token = NULL, google_refresh_token = NULL, " +
+    "google_token_expiry = NULL, google_email = NULL, google_scopes = NULL WHERE id = $1",
+    [req.user.id]
+  );
+  return res.json({ ok: true });
+});
+
+// Gmail search. Accepts either ?q=<raw_gmail_query> or a set of claim fields
+// (name, address, email, claim_number) and constructs an OR query from them.
+app.get('/gmail/search', requireAuth, async (req, res) => {
+  try {
+    const token = await googleAccessToken(req.user.id);
+    let q = String(req.query.q || '').trim();
+    if (!q) {
+      const parts = [];
+      const esc = (s) => '"' + String(s).replace(/"/g, '') + '"';
+      if (req.query.name)         parts.push(esc(req.query.name));
+      if (req.query.address)      parts.push(esc(req.query.address));
+      if (req.query.email)        parts.push('from:' + String(req.query.email));
+      if (req.query.claim_number) parts.push(esc(req.query.claim_number));
+      q = parts.join(' OR ');
+    }
+    if (!q) return res.json({ messages: [], query: '' });
+
+    const max = Math.min(parseInt(req.query.max) || 20, 50);
+    const listRes = await fetch(
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages?q=' +
+      encodeURIComponent(q) + '&maxResults=' + max,
+      { headers: { 'Authorization': 'Bearer ' + token } }
+    );
+    const listData = await listRes.json();
+    if (!listRes.ok) return res.status(500).json({ error: 'gmail list failed', detail: listData });
+
+    const messages = [];
+    for (const m of (listData.messages || []).slice(0, max)) {
+      try {
+        const r = await fetch(
+          'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + m.id +
+          '?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date',
+          { headers: { 'Authorization': 'Bearer ' + token } }
+        );
+        const md = await r.json();
+        const headers = {};
+        ((md.payload && md.payload.headers) || []).forEach(h => { headers[h.name] = h.value; });
+        messages.push({
+          id: m.id,
+          threadId: m.threadId,
+          snippet: md.snippet || '',
+          from: headers.From || '',
+          to: headers.To || '',
+          subject: headers.Subject || '',
+          date: headers.Date || '',
+          labelIds: md.labelIds || []
+        });
+      } catch (e) { /* skip this message */ }
+    }
+    return res.json({ query: q, count: messages.length, messages });
+  } catch (e) {
+    return res.status(500).json({ error: String(e && e.message || e).slice(0, 200) });
+  }
+});
+
+// Calendar — list events on the primary calendar.
+app.get('/calendar/events', requireAuth, async (req, res) => {
+  try {
+    const token = await googleAccessToken(req.user.id);
+    const timeMin = req.query.timeMin || new Date().toISOString();
+    const timeMax = req.query.timeMax ||
+      new Date(Date.now() + 60 * 86400000).toISOString();
+    const url = 'https://www.googleapis.com/calendar/v3/calendars/primary/events?' +
+      new URLSearchParams({
+        timeMin, timeMax,
+        singleEvents: 'true',
+        orderBy: 'startTime',
+        maxResults: String(Math.min(parseInt(req.query.maxResults) || 50, 250))
+      }).toString();
+    const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+    const data = await r.json();
+    if (!r.ok) return res.status(500).json({ error: 'calendar list failed', detail: data });
+    return res.json({ events: data.items || [] });
+  } catch (e) {
+    return res.status(500).json({ error: String(e && e.message || e).slice(0, 200) });
+  }
+});
+
+// Calendar — create an event.
+app.post('/calendar/events', requireAuth, async (req, res) => {
+  try {
+    const token = await googleAccessToken(req.user.id);
+    const r = await fetch(
+      'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body || {})
+      }
+    );
+    const data = await r.json();
+    if (!r.ok) return res.status(500).json({ error: 'calendar create failed', detail: data });
+    return res.json({ event: data });
+  } catch (e) {
+    return res.status(500).json({ error: String(e && e.message || e).slice(0, 200) });
+  }
+});
+
+// Calendar — update an event.
+app.patch('/calendar/events/:id', requireAuth, async (req, res) => {
+  try {
+    const token = await googleAccessToken(req.user.id);
+    const r = await fetch(
+      'https://www.googleapis.com/calendar/v3/calendars/primary/events/' +
+      encodeURIComponent(req.params.id),
+      {
+        method: 'PATCH',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body || {})
+      }
+    );
+    const data = await r.json();
+    if (!r.ok) return res.status(500).json({ error: 'calendar update failed', detail: data });
+    return res.json({ event: data });
+  } catch (e) {
+    return res.status(500).json({ error: String(e && e.message || e).slice(0, 200) });
+  }
+});
+
+// Calendar — delete an event.
+app.delete('/calendar/events/:id', requireAuth, async (req, res) => {
+  try {
+    const token = await googleAccessToken(req.user.id);
+    const r = await fetch(
+      'https://www.googleapis.com/calendar/v3/calendars/primary/events/' +
+      encodeURIComponent(req.params.id),
+      { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } }
+    );
+    if (!r.ok && r.status !== 204) {
+      const data = await r.json().catch(() => ({}));
+      return res.status(500).json({ error: 'calendar delete failed', detail: data });
 // DEBUG: dump all registered Express routes
 console.log('[routes-dump] start');
 let _rcount = 0;
