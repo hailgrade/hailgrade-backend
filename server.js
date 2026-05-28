@@ -826,21 +826,12 @@ app.post('/webhooks/zapier/claimwizard/:secret', async (req, res) => {
   }
 });
 
-// Health/ping for Zapier setup — the user can use this to verify the URL works
+// Health/ping for Zapier setup - the user can use this to verify the URL works
 // without actually creating a lead.
 app.get('/webhooks/zapier/claimwizard/:secret/ping', (req, res) => {
   if (!ZAPIER_WEBHOOK_SECRET) return res.status(503).json({ ok: false, error: 'webhook not configured' });
-
-
-    }
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(500).json({ error: String(e && e.message || e).slice(0, 200) });
-  }
-});
-
   if (req.params.secret !== ZAPIER_WEBHOOK_SECRET) return res.status(401).json({ ok: false, error: 'invalid secret' });
-  return res.json({ ok: true, message: 'Webhook URL is valid — point Zapier here.', at: new Date().toISOString() });
+  return res.json({ ok: true, message: 'Webhook URL is valid', at: new Date().toISOString() });
 });
 
 
