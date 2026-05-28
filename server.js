@@ -2735,6 +2735,13 @@ app.delete('/calendar/events/:id', requireAuth, async (req, res) => {
     if (!r.ok && r.status !== 204) {
       const data = await r.json().catch(() => ({}));
       return res.status(500).json({ error: 'calendar delete failed', detail: data });
+    }
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: String(e && e.message || e).slice(0, 200) });
+  }
+});
+
 // DEBUG: dump all registered Express routes
 console.log('[routes-dump] start');
 let _rcount = 0;
@@ -2747,7 +2754,7 @@ app._router.stack.forEach((m) => {
 });
 console.log('[routes-dump] total: ' + _rcount);
 
-// Smoke test endpoint added at very bottom to verify late-bound routes work
+// Smoke test endpoint
 app.get('/zz-smoke', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
     app.listen(port, () => {
