@@ -2742,6 +2742,22 @@ async function boot() {
     try { await q("CREATE UNIQUE INDEX IF NOT EXISTS team_jobs_user_claim ON team_jobs (user_id, claim_local_id)"); } catch (e) {}
     try { await q("CREATE INDEX IF NOT EXISTS team_jobs_org_idx ON team_jobs (org_id)"); } catch (e) {}
     try { await q("CREATE TABLE IF NOT EXISTS cloud_jobs (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, job_id TEXT NOT NULL, name TEXT, payload TEXT, size_bytes INTEGER, updated_at TIMESTAMPTZ DEFAULT now())"); } catch (e) { console.error("[schema] cloud_jobs", e); }
+
+// DEBUG: dump all registered Express routes
+console.log('[routes-dump] start');
+let _rcount = 0;
+app._router.stack.forEach((m) => {
+  if (m.route) {
+    const methods = Object.keys(m.route.methods).join(',').toUpperCase();
+    console.log('  ' + methods + ' ' + m.route.path);
+    _rcount++;
+  }
+});
+console.log('[routes-dump] total: ' + _rcount);
+
+// Smoke test endpoint added at very bottom to verify late-bound routes work
+app.get('/zz-smoke', (req, res) => res.json({ ok: true, ts: Date.now() }));
+
     app.listen(port, () => {
       console.log(`[boot] HailGrade API listening on :${port}`);
     });
