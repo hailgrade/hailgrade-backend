@@ -3032,6 +3032,114 @@ console.log('[routes-dump] total: ' + _rcount);
 // Smoke test endpoint
 app.get('/zz-smoke', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
+
+// ==================== Partner lead files (roofer attachments + contract flag) ====================
+(async function _ample_plf_migration() {
+  try {
+    if (typeof pool === "undefined") return;
+    await pool.query("CREATE TABLE IF NOT EXISTS partner_lead_files (id SERIAL PRIMARY KEY, lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE, uploader_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, mime_type TEXT, size_bytes INTEGER, data_base64 TEXT NOT NULL, is_signed_contract BOOLEAN DEFAULT FALSE, created_at TIMESTAMPTZ DEFAULT now())");
+    await pool.query("CREATE INDEX IF NOT EXISTS idx_plf_lead ON partner_lead_files(lead_id)");
+    await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS has_signed_contract BOOLEAN DEFAULT FALSE");
+    console.log("[ample] partner_lead_files migration ok");
+  } catch (err) {
+    console.error("[ample] partner_lead_files migration failed:", err && err.message);
+  }
+})();
+
+async function _ample_lead_access(leadId, user) {
+  const r = await pool.query("SELECT id, created_by, assigned_to, org_id FROM leads WHERE id = $1", [leadId]);
+  if (!r.rowCount) return { found: false };
+  const lead = r.rows[0];
+  const me = user.id;
+  let ok = lead.created_by === me || lead.assigned_to === me || (user.org_role === "owner" && lead.org_id === user.org_id);
+  if (!ok) {
+    const lk = await pool.query("SELECT 1 FROM partner_links WHERE (pa_user_id = $1 AND roofer_user_id = $2) OR (roofer_user_id = $1 AND pa_user_id = $2) LIMIT 1", [me, lead.created_by]);
+    ok = lk.rowCount > 0;
+  }
+  return { found: true, ok: ok, lead: lead };
+}
+
+app.post("/partners/lead/:lead_id/files", requireAuth, async (req, res) => {
+  try {
+    const leadId = parseInt(req.params.lead_id);
+    if (!Number.isFinite(leadId)) return res.status(400).json({ error: "bad_lead_id" });
+    const b = req.body || {};
+    const name = String(b.name || "").slice(0, 256).trim();
+    if (!name) return res.status(400).json({ error: "name_required" });
+    const data = String(b.data_base64 || "");
+    if (!data) return res.status(400).json({ error: "data_required" });
+    if (data.length > 3500000) return res.status(413).json({ error: "file_too_large", max: "2.5MB" });
+    const mime = String(b.mime_type || "").slice(0, 128) || null;
+    const size = Number.isFinite(b.size_bytes) ? parseInt(b.size_bytes) : null;
+    const isContract = !!b.is_signed_contract;
+    const access = await _ample_lead_access(leadId, req.user);
+    if (!access.found) return res.status(404).json({ error: "lead_not_found" });
+    if (!access.ok) return res.status(403).json({ error: "forbidden" });
+    const ins = await pool.query("INSERT INTO partner_lead_files (lead_id, uploader_user_id, name, mime_type, size_bytes, data_base64, is_signed_contract) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at", [leadId, req.user.id, name, mime, size, data, isContract]);
+    if (isContract) {
+      await pool.query("UPDATE leads SET has_signed_contract = TRUE, updated_at = now() WHERE id = $1", [leadId]);
+    }
+    return res.status(201).json({ ok: true, file_id: ins.rows[0].id, created_at: ins.rows[0].created_at });
+  } catch (err) {
+    console.error("[partners:lead-files POST]", err);
+    return res.status(500).json({ error: "upload_failed", detail: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.get("/partners/lead/:lead_id/files", requireAuth, async (req, res) => {
+  try {
+    const leadId = parseInt(req.params.lead_id);
+    if (!Number.isFinite(leadId)) return res.status(400).json({ error: "bad_lead_id" });
+    const access = await _ample_lead_access(leadId, req.user);
+    if (!access.found) return res.status(404).json({ error: "lead_not_found" });
+    if (!access.ok) return res.status(403).json({ error: "forbidden" });
+    const r = await pool.query("SELECT id, name, mime_type, size_bytes, is_signed_contract, uploader_user_id, created_at FROM partner_lead_files WHERE lead_id = $1 ORDER BY created_at ASC", [leadId]);
+    return res.json({ files: r.rows });
+  } catch (err) {
+    console.error("[partners:lead-files GET]", err);
+    return res.status(500).json({ error: "list_failed", detail: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.get("/partners/lead-files/:file_id", requireAuth, async (req, res) => {
+  try {
+    const fid = parseInt(req.params.file_id);
+    if (!Number.isFinite(fid)) return res.status(400).json({ error: "bad_file_id" });
+    const r = await pool.query("SELECT plf.*, l.created_by AS lcb, l.assigned_to AS lat, l.org_id AS log FROM partner_lead_files plf JOIN leads l ON l.id = plf.lead_id WHERE plf.id = $1", [fid]);
+    if (!r.rowCount) return res.status(404).json({ error: "file_not_found" });
+    const f = r.rows[0];
+    const me = req.user.id;
+    let ok = f.lcb === me || f.lat === me || (req.user.org_role === "owner" && f.log === req.user.org_id);
+    if (!ok) {
+      const lk = await pool.query("SELECT 1 FROM partner_links WHERE (pa_user_id = $1 AND roofer_user_id = $2) OR (roofer_user_id = $1 AND pa_user_id = $2) LIMIT 1", [me, f.lcb]);
+      ok = lk.rowCount > 0;
+    }
+    if (!ok) return res.status(403).json({ error: "forbidden" });
+    return res.json({ id: f.id, name: f.name, mime_type: f.mime_type, size_bytes: f.size_bytes, is_signed_contract: f.is_signed_contract, data_base64: f.data_base64, created_at: f.created_at });
+  } catch (err) {
+    console.error("[partners:lead-files single GET]", err);
+    return res.status(500).json({ error: "fetch_failed", detail: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.delete("/partners/lead-files/:file_id", requireAuth, async (req, res) => {
+  try {
+    const fid = parseInt(req.params.file_id);
+    if (!Number.isFinite(fid)) return res.status(400).json({ error: "bad_file_id" });
+    const r = await pool.query("SELECT plf.uploader_user_id, l.created_by AS lcb, l.org_id AS log FROM partner_lead_files plf JOIN leads l ON l.id = plf.lead_id WHERE plf.id = $1", [fid]);
+    if (!r.rowCount) return res.json({ ok: true });
+    const row = r.rows[0];
+    const isUploader = row.uploader_user_id === req.user.id;
+    const isOwner = row.lcb === req.user.id || (req.user.org_role === "owner" && row.log === req.user.org_id);
+    if (!isUploader && !isOwner) return res.status(403).json({ error: "forbidden" });
+    await pool.query("DELETE FROM partner_lead_files WHERE id = $1", [fid]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("[partners:lead-files DELETE]", err);
+    return res.status(500).json({ error: "delete_failed", detail: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
     app.listen(port, () => {
       console.log(`[boot] HailGrade API listening on :${port}`);
     });
