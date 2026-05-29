@@ -2976,6 +2976,47 @@ app.post('/partners/lead', requireAuth, async (req, res) => {
   }
 });
 
+app.post('/partners/event', requireAuth, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const shareWithId = parseInt(b.share_with_user_id);
+    if (!Number.isFinite(shareWithId)) return res.status(400).json({ error: 'share_with_user_id_required' });
+    const title = String(b.title || '').trim();
+    if (!title) return res.status(400).json({ error: 'title_required' });
+    if (!b.starts_at) return res.status(400).json({ error: 'starts_at_required' });
+    // Verify partner link in either direction
+    const linkRes = await pool.query("SELECT id FROM partner_links WHERE (roofer_user_id = $1 AND pa_user_id = $2) OR (pa_user_id = $1 AND roofer_user_id = $2) LIMIT 1", [req.user.id, shareWithId]);
+    if (!linkRes.rowCount) return res.status(403).json({ error: 'not_linked' });
+    // Look up recipient's org_id
+    const targetRes = await pool.query('SELECT id, org_id FROM users WHERE id = $1', [shareWithId]);
+    if (!targetRes.rowCount) return res.status(404).json({ error: 'user_not_found' });
+    const target = targetRes.rows[0];
+    // Look up caller for label
+    const meRes = await pool.query('SELECT id, full_name, firm_name, email FROM users WHERE id = $1', [req.user.id]);
+    const me = meRes.rows[0] || {};
+    const myLabel = me.firm_name || me.full_name || me.email || 'partner';
+    const sharedDescription = ('Shared by ' + myLabel + (b.description ? ('\n\n' + b.description) : ''));
+    const ins = await pool.query(
+      "INSERT INTO events (user_id, org_id, claim_local_id, title, description, starts_at, ends_at, all_day, location) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
+      [
+        shareWithId,
+        target.org_id || null,
+        null,
+        title,
+        sharedDescription,
+        b.starts_at,
+        b.ends_at || null,
+        !!b.all_day,
+        b.location || null
+      ]
+    );
+    return res.status(201).json({ ok: true, event_id: ins.rows[0].id });
+  } catch (err) {
+    console.error('[partners:event]', err);
+    return res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
 // DEBUG: dump all registered Express routes
 console.log('[routes-dump] start');
 let _rcount = 0;
