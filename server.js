@@ -2823,6 +2823,116 @@ app.delete('/calendar/events/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ============ Partner links (PA ↔ Roofer) ============
+// A PA and a roofer can link accounts so a roofer's 'Send Lead' form
+// auto-routes to a specific PA. Either side can generate a 6-char code;
+// the other side redeems it to create the link.
+(async () => {
+  try {
+    await pool.query("CREATE TABLE IF NOT EXISTS partner_links (id SERIAL PRIMARY KEY, pa_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, roofer_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(pa_user_id, roofer_user_id))");
+    await pool.query("CREATE TABLE IF NOT EXISTS partner_invite_codes (id SERIAL PRIMARY KEY, code TEXT UNIQUE NOT NULL, issuer_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, issuer_role TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), redeemed_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, redeemed_at TIMESTAMPTZ)");
+    console.log('[partners] schema ready');
+  } catch (e) { console.error('[partners schema]', e && e.message); }
+})();
+
+function _generatePartnerCode() {
+  // 6 chars, uppercase, no confusing 0/O/1/I/L
+  const alpha = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < 6; i++) s += alpha[Math.floor(Math.random() * alpha.length)];
+  return s;
+}
+
+function _userRole(u) {
+  if (!u) return 'user';
+  if (u.role === 'roofer') return 'roofer';
+  return 'pa';
+}
+
+app.post('/partners/code', requireAuth, async (req, res) => {
+  try {
+    const myRole = _userRole(req.user);
+    // Reuse an existing unredeemed code from this user if we have one (< 7 days old)
+    const existing = await pool.query("SELECT code, created_at FROM partner_invite_codes WHERE issuer_user_id = $1 AND redeemed_by_user_id IS NULL AND created_at > now() - interval '7 days' ORDER BY created_at DESC LIMIT 1", [req.user.id]);
+    if (existing.rowCount) {
+      return res.json({ code: existing.rows[0].code, issuer_role: myRole, reused: true });
+    }
+    // Generate a unique code (retry on collision)
+    let code = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const candidate = _generatePartnerCode();
+      const dup = await pool.query('SELECT 1 FROM partner_invite_codes WHERE code = $1', [candidate]);
+      if (!dup.rowCount) { code = candidate; break; }
+    }
+    if (!code) return res.status(500).json({ error: 'could_not_generate_code' });
+    await pool.query('INSERT INTO partner_invite_codes (code, issuer_user_id, issuer_role) VALUES ($1, $2, $3)', [code, req.user.id, myRole]);
+    res.json({ code, issuer_role: myRole, reused: false });
+  } catch (err) {
+    console.error('[partners:code]', err);
+    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.post('/partners/redeem', requireAuth, async (req, res) => {
+  try {
+    const code = String((req.body && req.body.code) || '').trim().toUpperCase();
+    if (!code || code.length !== 6) return res.status(400).json({ error: 'code_required' });
+    const cr = await pool.query('SELECT * FROM partner_invite_codes WHERE code = $1', [code]);
+    if (!cr.rowCount) return res.status(404).json({ error: 'code_not_found' });
+    const codeRow = cr.rows[0];
+    if (codeRow.redeemed_by_user_id) return res.status(409).json({ error: 'code_already_redeemed' });
+    if (codeRow.issuer_user_id === req.user.id) return res.status(400).json({ error: 'cant_redeem_own_code' });
+    const myRole = _userRole(req.user);
+    const issuerRole = String(codeRow.issuer_role || '').toLowerCase();
+    if (myRole === issuerRole) return res.status(400).json({ error: 'role_mismatch', message: 'This code is from another ' + issuerRole + '. You need a code from a ' + (myRole === 'roofer' ? 'PA' : 'roofer') + '.' });
+    const paId = (myRole === 'pa') ? req.user.id : codeRow.issuer_user_id;
+    const rooferId = (myRole === 'roofer') ? req.user.id : codeRow.issuer_user_id;
+    await pool.query('INSERT INTO partner_links (pa_user_id, roofer_user_id) VALUES ($1, $2) ON CONFLICT (pa_user_id, roofer_user_id) DO NOTHING', [paId, rooferId]);
+    await pool.query('UPDATE partner_invite_codes SET redeemed_by_user_id = $1, redeemed_at = now() WHERE id = $2', [req.user.id, codeRow.id]);
+    const partnerId = (myRole === 'pa') ? rooferId : paId;
+    const pu = await pool.query('SELECT id, email, full_name, firm_name, role FROM users WHERE id = $1', [partnerId]);
+    res.json({ ok: true, partner: pu.rows[0] || null });
+  } catch (err) {
+    console.error('[partners:redeem]', err);
+    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.get('/partners', requireAuth, async (req, res) => {
+  try {
+    const myRole = _userRole(req.user);
+    let sql, partnerColumn;
+    if (myRole === 'roofer') {
+      sql = "SELECT pl.id AS link_id, pl.created_at AS linked_at, u.id, u.email, u.full_name, u.firm_name, u.role FROM partner_links pl JOIN users u ON u.id = pl.pa_user_id WHERE pl.roofer_user_id = $1 ORDER BY pl.created_at DESC";
+    } else {
+      sql = "SELECT pl.id AS link_id, pl.created_at AS linked_at, u.id, u.email, u.full_name, u.firm_name, u.role FROM partner_links pl JOIN users u ON u.id = pl.roofer_user_id WHERE pl.pa_user_id = $1 ORDER BY pl.created_at DESC";
+    }
+    const r = await pool.query(sql, [req.user.id]);
+    res.json({ my_role: myRole, partners: r.rows });
+  } catch (err) {
+    console.error('[partners:list]', err);
+    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.delete('/partners/:partnerId', requireAuth, async (req, res) => {
+  try {
+    const partnerId = parseInt(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ error: 'bad_partner_id' });
+    const myRole = _userRole(req.user);
+    let result;
+    if (myRole === 'roofer') {
+      result = await pool.query('DELETE FROM partner_links WHERE roofer_user_id = $1 AND pa_user_id = $2', [req.user.id, partnerId]);
+    } else {
+      result = await pool.query('DELETE FROM partner_links WHERE pa_user_id = $1 AND roofer_user_id = $2', [req.user.id, partnerId]);
+    }
+    res.json({ ok: true, removed: result.rowCount });
+  } catch (err) {
+    console.error('[partners:unlink]', err);
+    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
 // DEBUG: dump all registered Express routes
 console.log('[routes-dump] start');
 let _rcount = 0;
