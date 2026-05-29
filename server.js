@@ -3140,6 +3140,59 @@ app.delete("/partners/lead-files/:file_id", requireAuth, async (req, res) => {
   }
 });
 
+
+// POST /partners/lead-with-files — atomic create-lead + upload-files in one call. Returns lead_id + file_ids.
+app.post("/partners/lead-with-files", requireAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const b = req.body || {};
+    const paUserId = parseInt(b.pa_user_id);
+    if (!Number.isFinite(paUserId)) return res.status(400).json({ error: "pa_user_id_required" });
+    const name = String(b.name || "").slice(0, 200).trim();
+    if (!name) return res.status(400).json({ error: "name_required" });
+    const email = b.email ? String(b.email).slice(0, 200).trim() : null;
+    const phone = b.phone ? String(b.phone).slice(0, 64).trim() : null;
+    const address = b.address ? String(b.address).slice(0, 500).trim() : null;
+    const notes = b.notes ? String(b.notes).slice(0, 4000) : null;
+    const files = Array.isArray(b.files) ? b.files : [];
+    if (files.length > 8) return res.status(400).json({ error: "too_many_files", max: 8 });
+    // Verify partner link exists in either direction
+    const lk = await client.query("SELECT id FROM partner_links WHERE (roofer_user_id = $1 AND pa_user_id = $2) OR (pa_user_id = $1 AND roofer_user_id = $2) LIMIT 1", [req.user.id, paUserId]);
+    if (!lk.rowCount) return res.status(403).json({ error: "not_linked" });
+    // Look up PA org info so the lead lands in the PA org
+    const paRes = await client.query("SELECT id, org_id, full_name, firm_name, email FROM users WHERE id = $1", [paUserId]);
+    if (!paRes.rowCount) return res.status(404).json({ error: "pa_not_found" });
+    const pa = paRes.rows[0];
+    // Look up roofer label for source line
+    const meRes = await client.query("SELECT id, full_name, firm_name, email FROM users WHERE id = $1", [req.user.id]);
+    const me = meRes.rows[0] || {};
+    const sourceLabel = "From roofer: " + (me.firm_name || me.full_name || me.email || ("user " + req.user.id));
+    const hasSigned = files.some(f => !!f.is_signed_contract);
+    await client.query("BEGIN");
+    const ins = await client.query("INSERT INTO leads (org_id, created_by, assigned_to, assigned_by, name, email, phone, address, source, notes, status, has_signed_contract) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, created_at", [pa.org_id || null, req.user.id, paUserId, req.user.id, name, email, phone, address, sourceLabel, notes, "new", hasSigned]);
+    const leadId = ins.rows[0].id;
+    const fileIds = [];
+    for (const f of files) {
+      const fname = String(f.name || "untitled").slice(0, 256).trim();
+      const data = String(f.data_base64 || "");
+      if (!data) continue;
+      if (data.length > 3500000) { await client.query("ROLLBACK"); return res.status(413).json({ error: "file_too_large", name: fname, max: "2.5MB" }); }
+      const mime = String(f.mime_type || "").slice(0, 128) || null;
+      const size = Number.isFinite(f.size_bytes) ? parseInt(f.size_bytes) : null;
+      const isContract = !!f.is_signed_contract;
+      const fr = await client.query("INSERT INTO partner_lead_files (lead_id, uploader_user_id, name, mime_type, size_bytes, data_base64, is_signed_contract) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id", [leadId, req.user.id, fname, mime, size, data, isContract]);
+      fileIds.push(fr.rows[0].id);
+    }
+    await client.query("COMMIT");
+    return res.status(201).json({ ok: true, lead_id: leadId, created_at: ins.rows[0].created_at, file_ids: fileIds, has_signed_contract: hasSigned });
+  } catch (err) {
+    try { await client.query("ROLLBACK"); } catch (e) {}
+    console.error("[partners:lead-with-files]", err);
+    return res.status(500).json({ error: "create_failed", detail: String((err && err.message) || err).slice(0, 200) });
+  } finally {
+    client.release();
+  }
+});
     app.listen(port, () => {
       console.log(`[boot] HailGrade API listening on :${port}`);
     });
