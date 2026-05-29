@@ -2933,6 +2933,49 @@ app.delete('/partners/:partnerId', requireAuth, async (req, res) => {
   }
 });
 
+app.post('/partners/lead', requireAuth, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const paUserId = parseInt(b.pa_user_id);
+    if (!Number.isFinite(paUserId)) return res.status(400).json({ error: 'pa_user_id_required' });
+    const name = String(b.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name_required' });
+    // Verify partner_link exists in either direction
+    const linkRes = await pool.query("SELECT id FROM partner_links WHERE (roofer_user_id = $1 AND pa_user_id = $2) OR (pa_user_id = $1 AND roofer_user_id = $2) LIMIT 1", [req.user.id, paUserId]);
+    if (!linkRes.rowCount) return res.status(403).json({ error: 'not_linked' });
+    // Look up the recipient PA's org_id (for org-scoped pipelines)
+    const paRes = await pool.query('SELECT id, org_id, full_name, firm_name FROM users WHERE id = $1', [paUserId]);
+    if (!paRes.rowCount) return res.status(404).json({ error: 'pa_not_found' });
+    const pa = paRes.rows[0];
+    // Look up the calling roofer for the source label
+    const meRes = await pool.query('SELECT id, full_name, firm_name, email FROM users WHERE id = $1', [req.user.id]);
+    const me = meRes.rows[0] || {};
+    const myLabel = me.firm_name || me.full_name || me.email || 'a partner roofer';
+    const source = (b.source ? String(b.source) : ('From roofer ' + myLabel)).slice(0, 200);
+    const ins = await pool.query(
+      "INSERT INTO leads (org_id, name, email, phone, address, carrier, claim_number, source, notes, assigned_to, assigned_at, assigned_by, status, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11, 'new', $12) RETURNING id",
+      [
+        pa.org_id || null,
+        name,
+        String(b.email || '').trim() || null,
+        String(b.phone || '').trim() || null,
+        String(b.address || '').trim() || null,
+        String(b.carrier || '').trim() || null,
+        String(b.claim_number || '').trim() || null,
+        source,
+        String(b.notes || '').trim() || null,
+        paUserId,
+        req.user.id,
+        req.user.id
+      ]
+    );
+    return res.status(201).json({ ok: true, lead_id: ins.rows[0].id });
+  } catch (err) {
+    console.error('[partners:lead]', err);
+    return res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
 // DEBUG: dump all registered Express routes
 console.log('[routes-dump] start');
 let _rcount = 0;
