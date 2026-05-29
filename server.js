@@ -3068,7 +3068,7 @@ app.post("/partners/lead/:lead_id/files", requireAuth, async (req, res) => {
     if (!name) return res.status(400).json({ error: "name_required" });
     const data = String(b.data_base64 || "");
     if (!data) return res.status(400).json({ error: "data_required" });
-    if (data.length > 3500000) return res.status(413).json({ error: "file_too_large", max: "2.5MB" });
+    if (data.length > 14000000) return res.status(413).json({ error: "file_too_large", max: "10MB" });
     const mime = String(b.mime_type || "").slice(0, 128) || null;
     const size = Number.isFinite(b.size_bytes) ? parseInt(b.size_bytes) : null;
     const isContract = !!b.is_signed_contract;
@@ -3176,7 +3176,7 @@ app.post("/partners/lead-with-files", requireAuth, async (req, res) => {
       const fname = String(f.name || "untitled").slice(0, 256).trim();
       const data = String(f.data_base64 || "");
       if (!data) continue;
-      if (data.length > 3500000) { await client.query("ROLLBACK"); return res.status(413).json({ error: "file_too_large", name: fname, max: "2.5MB" }); }
+      if (data.length > 14000000) { await client.query("ROLLBACK"); return res.status(413).json({ error: "file_too_large", name: fname, max: "10MB" }); }
       const mime = String(f.mime_type || "").slice(0, 128) || null;
       const size = Number.isFinite(f.size_bytes) ? parseInt(f.size_bytes) : null;
       const isContract = !!f.is_signed_contract;
