@@ -69,18 +69,19 @@ app.get('/health', async (req, res) => {
 // ============ Auth ============
 app.post('/auth/signup', async (req, res) => {
   try {
-    const { email, password, full_name, license_number, firm_name } = req.body || {};
+    const { email, password, full_name, license_number, firm_name, role } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: 'email_and_password_required' });
     if (password.length < 8) return res.status(400).json({ error: 'password_too_short', message: 'Password must be at least 8 characters.' });
+    const safeRole = (String(role || '').toLowerCase() === 'roofer') ? 'roofer' : 'user';
     const lower = email.trim().toLowerCase();
     const existing = await one('SELECT id FROM users WHERE lower(email) = $1', [lower]);
     if (existing) return res.status(409).json({ error: 'email_in_use' });
     const hash = await hashPassword(password);
     const user = await one(
-      `INSERT INTO users (email, password_hash, full_name, license_number, firm_name)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO users (email, password_hash, full_name, license_number, firm_name, role)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, email, full_name, license_number, firm_name, role, plan, plan_status`,
-      [lower, hash, full_name || null, license_number || null, firm_name || null]
+      [lower, hash, full_name || null, license_number || null, firm_name || null, safeRole]
     );
     const token = signToken(user);
     res.json({ token, user });
