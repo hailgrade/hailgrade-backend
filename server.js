@@ -1064,6 +1064,46 @@ app.post('/billing/portal', requireAuth, async (req, res) => {
 //   - Open-Meteo Historical (wind gusts) — free, no API key
 //   - Iowa State Mesonet (NWS Local Storm Reports for hail) — free, no API key
 // Geocoding: Nominatim (OSM) — free, requires User-Agent header
+// ============ SPC verification helpers ============
+// Cross-check raw NWS Local Storm Reports against SPC's curated daily storm reports.
+// SPC drops duplicates, retractions, and unconfirmed single-spotter calls — so SPC-verified
+// events are the carrier-defensible subset that an adjuster can independently check.
+const _spcCache = new Map();
+const SPC_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+async function _fetchSpcDay(yymmdd, kind) {
+  if (!yymmdd || (kind !== 'hail' && kind !== 'wind')) return [];
+  const key = yymmdd + '-' + kind;
+  const cached = _spcCache.get(key);
+  if (cached && (Date.now() - cached.at) < SPC_CACHE_TTL_MS) return cached.rows;
+  const url = 'https://www.spc.noaa.gov/climo/reports/' + yymmdd + '_rpts_' + kind + '.csv';
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': 'Ample/1.0 (claims@smithadjusters.com)' } });
+    if (!r.ok) { _spcCache.set(key, { rows: [], at: Date.now() }); return []; }
+    const text = await r.text();
+    const rows = [];
+    const lines = text.split(/\r?\n/);
+    for (let i = 1; i < lines.length; i++) {
+      const line = (lines[i] || '').trim();
+      if (!line) continue;
+      const fields = line.split(',');
+      if (fields.length < 7) continue;
+      const lat = parseFloat(fields[5]);
+      const lon = parseFloat(fields[6]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      rows.push({ lat: lat, lon: lon });
+    }
+    _spcCache.set(key, { rows: rows, at: Date.now() });
+    return rows;
+  } catch (e) {
+    console.error('[spc fetch]', kind, yymmdd, e && e.message);
+    return [];
+  }
+}
+function _isoToYYMMDD(iso) {
+  if (!iso || iso.length < 10) return null;
+  return iso.slice(2, 4) + iso.slice(5, 7) + iso.slice(8, 10);
+}
+
 app.post('/weather/history', requireAuth, async (req, res) => {
   try {
     let { address, lat, lng, days } = req.body || {};
@@ -1132,6 +1172,8 @@ app.post('/weather/history', requireAuth, async (req, res) => {
       const remark = c.slice(12, Math.max(13, c.length - 3)).join(',').trim();
       const ev = {
         date: date,
+        lat: elat,
+        lng: elng,
         type: isHail ? 'hail' : 'wind',
         magnitude: (isFinite(mag) && mag > 0) ? mag : null,
         unit: isHail ? 'in' : 'mph',
@@ -1152,12 +1194,50 @@ app.post('/weather/history', requireAuth, async (req, res) => {
       })
       .slice(0, 120);
 
+    // 5. Cross-check each event against SPC's curated daily storm report file.
+    // For each unique date+type, fetch SPC's CSV once and tag events within 5 miles
+    // as SPC-verified. This is what an adjuster will independently check.
+    try {
+      const dateTypeKeys = new Set();
+      for (const e of events) {
+        if (e.date && (e.type === 'hail' || e.type === 'wind') && Number.isFinite(e.lat) && Number.isFinite(e.lng)) {
+          dateTypeKeys.add(_isoToYYMMDD(e.date) + '|' + e.type);
+        }
+      }
+      const spcByKey = new Map();
+      for (const key of dateTypeKeys) {
+        const [yymmdd, kind] = key.split('|');
+        const rows = await _fetchSpcDay(yymmdd, kind);
+        spcByKey.set(key, rows);
+      }
+      for (const e of events) {
+        e.spc_verified = false;
+        if (!Number.isFinite(e.lat) || !Number.isFinite(e.lng)) continue;
+        const key = _isoToYYMMDD(e.date) + '|' + e.type;
+        const rows = spcByKey.get(key) || [];
+        for (const r of rows) {
+          if (haversineMi(e.lat, e.lng, r.lat, r.lon) <= 5) { e.spc_verified = true; break; }
+        }
+      }
+    } catch (spcErr) {
+      console.error('[weather/history] SPC cross-check failed', spcErr.message);
+      for (const e of events) { e.spc_verified = false; }
+    }
+
     res.json({
       ok: true,
       location: { lat: lat, lng: lng, wfo: wfo, city: placeCity, state: placeState, geocoded: geocoded },
       window: { start: start.toISOString().slice(0,10), end: end.toISOString().slice(0,10), days: days },
-      counts: { hail: hailEvents.length, wind: windEvents.length, total: hailEvents.length + windEvents.length },
-      events: events
+      counts: { hail: hailEvents.length, wind: windEvents.length, total: hailEvents.length + windEvents.length, spc_verified: events.filter(function(e){return e.spc_verified;}).length },
+      events: events,
+      methodology: {
+        primary_source: 'NWS Local Storm Reports (LSR)',
+        primary_source_url: 'https://mesonet.agron.iastate.edu/lsr/',
+        verification_source: 'NOAA SPC daily storm reports',
+        verification_source_url: 'https://www.spc.noaa.gov/climo/reports/',
+        verification_radius_mi: 5,
+        notes: 'LSRs are raw reports phoned to local NWS offices by trained spotters, public, and law enforcement. SPC-verified events also appeared in SPC\'s curated daily storm report file for the same date within 5 miles. Unverified LSRs are still real reports but were filtered by SPC as duplicate, retracted, or unconfirmed.'
+      }
     });
   } catch (err) {
     console.error('[weather/history]', err);
