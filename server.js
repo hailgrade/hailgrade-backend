@@ -1408,49 +1408,64 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     if (!signerName || !signerEmail) return res.status(400).json({ error: "Client name and email are required" });
 
     // Load the template — use the ORIGINAL pdf_base64 (no AI rebuild = no font/spacing drift)
-    const tpl = dsRowsOf(await q("SELECT id, filename, pdf_base64, field_map FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts S WHERE S.user_id=$1)) ORDER BY id DESC LIMIT 1", [req.user.id, templateId]));
+    const tpl = dsRowsOf(await q("SELECT id, name, filename, pdf_base64, field_map FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts S WHERE S.user_id=$1)) ORDER BY id DESC LIMIT 1", [req.user.id, templateId]));
     if (!tpl.length) return res.status(400).json({ error: "Upload your contract first" });
-    const originalPdfB64 = tpl[0].pdf_base64;
+    const tplRow = tpl[0];
+    const originalPdfB64 = tplRow.pdf_base64;
     if (!originalPdfB64) return res.status(400).json({ error: "Contract template has no PDF file" });
     const b64 = (originalPdfB64.indexOf(",") >= 0) ? originalPdfB64.split(",").pop() : originalPdfB64;
     let originalBuf;
     try { originalBuf = Buffer.from(b64, "base64"); }
     catch (e) { return res.status(500).json({ error: "Could not decode contract PDF" }); }
 
-    // Load with pdf-lib so we can: (a) overlay auto-filled text values, (b) read page dimensions for field positioning
-    let pdfDoc, pages, pageCount = 1, pageW = 612, pageH = 792;
-    try {
-      pdfDoc = await PDFDocument.load(originalBuf);
-      pages = pdfDoc.getPages();
-      pageCount = pages.length;
-      if (pages[0]) { const sz = pages[0].getSize(); pageW = sz.width; pageH = sz.height; }
-    } catch (e) {
-      console.error("[contracts/send] could not parse PDF", e);
-      return res.status(500).json({ error: "Contract PDF appears corrupted" });
-    }
-
-    // Overlay auto-filled text values onto the original PDF (preserves everything else byte-for-byte)
+    // Parse field_map (may be empty / null for fresh uploads)
     let fieldMap = [];
     try {
-      const raw = tpl[0].field_map;
-      fieldMap = (typeof raw === "object" && raw) ? (Array.isArray(raw) ? raw : (raw.fields || [])) : (raw ? (Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : (JSON.parse(raw).fields || [])) : []);
+      const raw = tplRow.field_map;
+      if (raw == null || raw === "") fieldMap = [];
+      else if (typeof raw === "object") fieldMap = Array.isArray(raw) ? raw : (raw.fields || []);
+      else { const p = JSON.parse(String(raw)); fieldMap = Array.isArray(p) ? p : (p.fields || []); }
     } catch (e) { fieldMap = []; }
-    let helvetica = null;
-    try { helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica); } catch (e) {}
-    for (const f of fieldMap) {
-      if (!f || typeof f !== "object") continue;
-      const fid = f.id || f.name || "";
-      const val = fieldValues[fid];
-      if (val == null || val === "") continue;
-      const ftype = (f.type || "text").toLowerCase();
-      if (ftype !== "text" && ftype !== "string") continue;
-      const pageIdx = Math.max(0, Math.min(pageCount - 1, (f.page || 1) - 1));
-      const px = +f.x || 0;
-      const py = +f.y || 0;
-      const fs = +f.fontSize || 11;
-      try { pages[pageIdx].drawText(String(val), { x: px, y: py, size: fs, font: helvetica || undefined }); } catch (e) {}
+    const hasOverlay = fieldMap.some(f => f && fieldValues[f.id || f.name] && ((f.type || "text").toLowerCase() === "text" || (f.type || "").toLowerCase() === "string"));
+
+    // Read page dimensions for field positioning. If no overlay is needed, skip pdf-lib serialization entirely (preserves original PDF byte-for-byte).
+    let pageCount = 1, pageW = 612, pageH = 792;
+    let outBuf = originalBuf;
+    if (hasOverlay) {
+      try {
+        const pdfDoc = await PDFDocument.load(originalBuf);
+        const pages = pdfDoc.getPages();
+        pageCount = pages.length;
+        if (pages[0]) { const sz = pages[0].getSize(); pageW = sz.width; pageH = sz.height; }
+        let helvetica = null;
+        try { helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica); } catch (e) {}
+        for (const f of fieldMap) {
+          if (!f || typeof f !== "object") continue;
+          const fid = f.id || f.name || "";
+          const val = fieldValues[fid];
+          if (val == null || val === "") continue;
+          const ftype = (f.type || "text").toLowerCase();
+          if (ftype !== "text" && ftype !== "string") continue;
+          const pageIdx = Math.max(0, Math.min(pageCount - 1, (f.page || 1) - 1));
+          const px = +f.x || 0;
+          const py = +f.y || 0;
+          const fs = +f.fontSize || 11;
+          try { pages[pageIdx].drawText(String(val), { x: px, y: py, size: fs, font: helvetica || undefined }); } catch (e) {}
+        }
+        outBuf = Buffer.from(await pdfDoc.save());
+      } catch (e) {
+        console.error("[contracts/send] overlay failed, falling back to original", e);
+        outBuf = originalBuf;
+      }
+    } else {
+      // No overlay needed — but we still need page dims for field positioning. Read with pdf-lib but don't re-save.
+      try {
+        const pdfDoc = await PDFDocument.load(originalBuf);
+        const pages = pdfDoc.getPages();
+        pageCount = pages.length;
+        if (pages[0]) { const sz = pages[0].getSize(); pageW = sz.width; pageH = sz.height; }
+      } catch (e) { /* fall back to defaults */ }
     }
-    const filledBuf = Buffer.from(await pdfDoc.save());
 
     // Build the signer list
     const signers = [{ name: signerName, email: signerEmail, order: 0 }];
@@ -1458,10 +1473,7 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     if (useClient2 && signer2Email) { signers.push({ name: signer2Name || "Second Signer", email: signer2Email, order: sp }); sp++; }
     if (needsAdjuster) { signers.push({ name: req.user.full_name || req.user.firm_name || "Public Adjuster", email: req.user.email, order: sp }); sp++; }
 
-    // Build form_fields_per_document — Dropbox Sign overlays these as click-to-fill widgets on the original PDF.
-    // (a) Initials at bottom-right of every page (signer 0 — primary client)
-    // (b) Signature + date on the last page, also signer 0
-    // (c) Optional second client and/or adjuster signature on the last page
+    // Build form_fields_per_document — initials per page + signature + date on last page
     const fields = [];
     let apiSeq = 0;
     const nextId = () => "field_" + (++apiSeq);
@@ -1471,7 +1483,6 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     for (let p = 1; p <= pageCount; p++) {
       fields.push({ api_id: nextId(), type: "initials", page: p, x: pageW - INIT_W - 18, y: 18, width: INIT_W, height: INIT_H, required: true, signer: 0 });
     }
-    // Last page signatures
     const lastPage = pageCount;
     fields.push({ api_id: nextId(), type: "signature", page: lastPage, x: 50, y: 120, width: SIG_W, height: SIG_H, required: true, signer: 0 });
     fields.push({ api_id: nextId(), type: "date_signed", page: lastPage, x: 50 + SIG_W + 20, y: 120, width: DATE_W, height: DATE_H, required: true, signer: 0 });
@@ -1485,11 +1496,14 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
       fields.push({ api_id: nextId(), type: "date_signed", page: lastPage, x: pageW - SIG_W - 50, y: 90, width: DATE_W, height: DATE_H, required: true, signer: adjSignerIdx });
     }
 
-    // Build multipart form for Dropbox Sign /signature_request/send
+    // Use the template's actual name for the document title (not the hardcoded "Roofing Agreement").
+    const tplName = (tplRow.name || (tplRow.filename || "").replace(/\.pdf$/i, "") || "Agreement").trim();
+    const docTitle = tplName + (claimName ? " - " + claimName : "");
+
     const form = new FormData();
-    form.append("title", "Roofing Agreement" + (claimName ? " - " + claimName : ""));
-    form.append("subject", "Please sign your roofing agreement");
-    form.append("message", "Please review and sign your roofing agreement. A signed copy will be emailed to all parties once complete.");
+    form.append("title", docTitle);
+    form.append("subject", "Please sign: " + docTitle);
+    form.append("message", "Please review and sign. A signed copy will be emailed to all parties once complete.");
     signers.forEach((s, i) => {
       form.append("signers[" + i + "][name]", s.name);
       form.append("signers[" + i + "][email_address]", s.email);
@@ -1497,8 +1511,7 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     });
     if (!needsAdjuster) form.append("cc_email_addresses[0]", req.user.email);
     form.append("test_mode", "1");
-    form.append("file[0]", new Blob([filledBuf], { type: "application/pdf" }), tpl[0].filename || "agreement.pdf");
-    // form_fields_per_document is a JSON-encoded array of arrays (one inner array per file in this request)
+    form.append("file[0]", new Blob([outBuf], { type: "application/pdf" }), tplRow.filename || "agreement.pdf");
     form.append("form_fields_per_document", JSON.stringify([fields]));
 
     const dsRes = await fetch("https://api.hellosign.com/v3/signature_request/send", { method: "POST", headers: { "Authorization": dsAuthHeader() }, body: form });
@@ -1516,7 +1529,6 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Could not send contract" });
   }
 });
-
 app.get("/contracts/list", requireAuth, async (req, res) => {
   try {
     await ensureContractsSchema();
