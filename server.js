@@ -2039,7 +2039,10 @@ async function renderContractPdf(doc, opts) {
 // No upload, no AI rebuild, no template plumbing.
 
 async function buildLorPdf(opts = {}) {
-  const prefill = opts.prefill || {};
+  // STATIC FILL MODE: every form field is rendered as plain text from `opts.prefill`.
+  // Only signatures, dates, and per-page initials remain as Dropbox Sign widgets,
+  // so the client just signs/initials — they don't fill anything.
+  const p     = opts.prefill || {};
   const ROLE  = "signer1";
   const ROLE2 = "signer2";
 
@@ -2056,7 +2059,6 @@ async function buildLorPdf(opts = {}) {
   const T = (page, s, x, y, size = 11, font = helv, color = BLACK) =>
     page.drawText(String(s == null ? "" : s), { x, y, size, font, color });
 
-  // Bigger default so Dropbox Sign widgets are tall enough to hold typed text.
   const TAG = (page, s, x, y, size = 14) =>
     page.drawText(s, { x, y, size, font: helv, color: WHITE });
 
@@ -2070,15 +2072,12 @@ async function buildLorPdf(opts = {}) {
     T(page, "SMITH ",    cx - total / 2,      cy, size, bold, BLACK);
     T(page, "ADJUSTERS", cx - total / 2 + sw, cy, size, bold, GREEN);
   }
-
   function header(page) {
     brand(page, W / 2, H - 55, 18);
     const title = "Public Adjuster Contract";
     const tw = bold.widthOfTextAtSize(title, 20);
     T(page, title, W / 2 - tw / 2, H - 95, 20, bold);
   }
-
-  // Each page passes its number so initials get unique names → independent widgets.
   function footer(page, pn) {
     const fy = 95;
     const a = "SMITH ADJUSTERS";
@@ -2090,84 +2089,88 @@ async function buildLorPdf(opts = {}) {
     const c = "407-755-7682   claims@smithadjusters.com   www.smithadjusters.com";
     const cw = helv.widthOfTextAtSize(c, 9);
     T(page, c, W / 2 - cw / 2, fy - 28, 9);
-
     T(page, "Initials:", RIGHT - 130, 45, 10);
     LINE(page, RIGHT - 95, 43, RIGHT);
-    // Unique name per page so each is its own widget the signer must touch
     TAG(page, "[init|init_p" + pn + "|" + ROLE + "]", RIGHT - 90, 47, 14);
   }
+
+  // helper: draw labelled static text with the line under it
+  function fillField(page, label, value, x, y, lineStart, lineEnd) {
+    T(page, label, x, y);
+    LINE(page, lineStart, y - 4, lineEnd);
+    if (value) T(page, String(value), lineStart + 3, y);
+  }
+
+  // checkbox: type is "non_emergency" | "emergency_supplemental" | "reopen"
+  function cbox(page, label, selected, x, y) {
+    T(page, selected ? "[X] " : "[  ] ", x, y, 11, bold);
+    T(page, label, x + 22, y);
+  }
+
+  // try to split a date string into "day" and "month/year"
+  function splitDate(dateStr) {
+    if (!dateStr) return { day: "", monthYear: "" };
+    const s = String(dateStr).trim();
+    // ISO like 2026-06-15
+    let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) {
+      const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+      return { day: String(parseInt(m[3], 10)), monthYear: months[parseInt(m[2], 10) - 1] + " " + m[1] };
+    }
+    // mm/dd/yyyy
+    m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (m) {
+      const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+      const yr = m[3].length === 2 ? "20" + m[3] : m[3];
+      return { day: String(parseInt(m[2], 10)), monthYear: months[parseInt(m[1], 10) - 1] + " " + yr };
+    }
+    // fallback: put the whole thing in monthYear
+    return { day: "", monthYear: s };
+  }
+  const dol = splitDate(p.date_of_loss);
 
   /* ============ PAGE 1 ============ */
   let page = pdf.addPage([W, H]);
   header(page);
   let y = H - 140;
 
-  T(page, "Insurance Company:", LEFT, y);
-  LINE(page, LEFT + 125, y - 4, LEFT + 280);
-  TAG(page, "[text|insurance_company|" + ROLE + "||150]", LEFT + 127, y - 2);
-  if (prefill.insurance_company) T(page, prefill.insurance_company, LEFT + 130, y);
-  T(page, "Policy #:", LEFT + 300, y);
-  LINE(page, LEFT + 350, y - 4, RIGHT);
-  TAG(page, "[text|policy_number|" + ROLE + "||135]", LEFT + 352, y - 2);
-  if (prefill.policy_number) T(page, prefill.policy_number, LEFT + 355, y);
+  fillField(page, "Insurance Company:", p.insurance_company, LEFT,        y, LEFT + 125, LEFT + 280);
+  fillField(page, "Policy #:",          p.policy_number,     LEFT + 300,  y, LEFT + 350, RIGHT);
+  y -= 32;
+  fillField(page, "Claim #:",           p.claim_number,      LEFT,        y, LEFT + 55,  LEFT + 225);
+  fillField(page, "Date of Loss:",      p.date_of_loss,      LEFT + 245,  y, LEFT + 325, RIGHT);
   y -= 32;
 
-  T(page, "Claim #:", LEFT, y);
-  LINE(page, LEFT + 55, y - 4, LEFT + 225);
-  TAG(page, "[text|claim_number|" + ROLE + "||165]", LEFT + 57, y - 2);
-  if (prefill.claim_number) T(page, prefill.claim_number, LEFT + 60, y);
-  T(page, "Date of Loss:", LEFT + 245, y);
-  LINE(page, LEFT + 325, y - 4, RIGHT);
-  TAG(page, "[text|date_of_loss|" + ROLE + "||130]", LEFT + 327, y - 2);
-  if (prefill.date_of_loss) T(page, prefill.date_of_loss, LEFT + 330, y);
+  cbox(page, "Non-emergency",          p.claim_type === "non_emergency",          LEFT,       y);
+  cbox(page, "Emergency Supplemental", p.claim_type === "emergency_supplemental", LEFT + 165, y);
+  cbox(page, "Reopen",                 p.claim_type === "reopen",                 LEFT + 360, y);
   y -= 32;
 
-  T(page, "[  ] Non-emergency",          LEFT,     y);
-  TAG(page, "[checkbox|non_emergency|"          + ROLE + "]", LEFT + 4,   y - 1, 12);
-  T(page, "[  ] Emergency Supplemental", LEFT + 165, y);
-  TAG(page, "[checkbox|emergency_supplemental|" + ROLE + "]", LEFT + 169, y - 1, 12);
-  T(page, "[  ] Reopen",                 LEFT + 360, y);
-  TAG(page, "[checkbox|reopen|"                 + ROLE + "]", LEFT + 364, y - 1, 12);
-  y -= 32;
-
+  // "The undersigned insured(s) ___ hereby retains..."
   T(page, "The undersigned insured(s)", LEFT, y);
   LINE(page, LEFT + 170, y - 4, LEFT + 345);
-  TAG(page, "[text|insured_name|" + ROLE + "||170]", LEFT + 172, y - 2);
+  if (p.insured_name) T(page, p.insured_name, LEFT + 173, y);
   T(page, "hereby retains Smith Adjusters to assist in the", LEFT + 352, y);
   y -= 22;
   T(page, "preparation, presentation, adjustment and negotiation of the claim for the loss which", LEFT, y);
   y -= 22;
   T(page, "occurred on or about the", LEFT, y);
   LINE(page, LEFT + 150, y - 4, LEFT + 205);
-  TAG(page, "[text|loss_day|" + ROLE + "||50]", LEFT + 152, y - 2);
+  if (dol.day) T(page, dol.day, LEFT + 165, y);
   T(page, "day of", LEFT + 212, y);
   LINE(page, LEFT + 250, y - 4, RIGHT);
-  TAG(page, "[text|loss_month_year|" + ROLE + "||295]", LEFT + 252, y - 2);
+  if (dol.monthYear) T(page, dol.monthYear, LEFT + 253, y);
   y -= 22;
   T(page, "on the property located at", LEFT, y);
   LINE(page, LEFT + 155, y - 4, RIGHT);
-  TAG(page, "[text|property_address|" + ROLE + "||335]", LEFT + 157, y - 2);
-  if (prefill.property_address) T(page, prefill.property_address, LEFT + 160, y);
+  if (p.property_address) T(page, p.property_address, LEFT + 158, y);
   y -= 26;
 
-  T(page, "Phone #:", LEFT, y);
-  LINE(page, LEFT + 55, y - 4, LEFT + 245);
-  TAG(page, "[text|phone|" + ROLE + "||185]", LEFT + 57, y - 2);
-  if (prefill.phone) T(page, prefill.phone, LEFT + 60, y);
-  T(page, "Email:", LEFT + 265, y);
-  LINE(page, LEFT + 305, y - 4, RIGHT);
-  TAG(page, "[text|email|" + ROLE + "||245]", LEFT + 307, y - 2);
-  if (prefill.email) T(page, prefill.email, LEFT + 310, y);
+  fillField(page, "Phone #:",         p.phone, LEFT,       y, LEFT + 55,  LEFT + 245);
+  fillField(page, "Email:",           p.email, LEFT + 265, y, LEFT + 305, RIGHT);
   y -= 26;
-
-  T(page, "Caused by:", LEFT, y);
-  LINE(page, LEFT + 65, y - 4, LEFT + 265);
-  TAG(page, "[text|caused_by|" + ROLE + "||195]", LEFT + 67, y - 2);
-  if (prefill.caused_by) T(page, prefill.caused_by, LEFT + 70, y);
-  T(page, "Probable Damage:", LEFT + 280, y);
-  LINE(page, LEFT + 385, y - 4, RIGHT);
-  TAG(page, "[text|probable_damage|" + ROLE + "||165]", LEFT + 387, y - 2);
-  if (prefill.probable_damage) T(page, prefill.probable_damage, LEFT + 390, y);
+  fillField(page, "Caused by:",       p.caused_by,       LEFT,       y, LEFT + 65,  LEFT + 265);
+  fillField(page, "Probable Damage:", p.probable_damage, LEFT + 280, y, LEFT + 385, RIGHT);
   y -= 34;
 
   for (const ln of [
@@ -2236,8 +2239,7 @@ async function buildLorPdf(opts = {}) {
   T(page, "In consideration thereof, the undersigned insured(s) hereby", LEFT, y, 12); y -= 18;
   T(page, "agrees to assign Smith Adjusters", LEFT, y, 12);
   LINE(page, LEFT + 200, y - 4, LEFT + 250);
-  TAG(page, "[text|fee_percent|" + ROLE + "||45]", LEFT + 203, y - 2);
-  if (prefill.fee_percent) T(page, String(prefill.fee_percent), LEFT + 207, y, 12);
+  if (p.fee_percent) T(page, String(p.fee_percent), LEFT + 215, y, 12);
   T(page, "% percent of the total", LEFT + 258, y, 12); y -= 18;
   for (const ln of [
     "proceeds recovered from the insurance company whether by",
@@ -2253,20 +2255,16 @@ async function buildLorPdf(opts = {}) {
   page = pdf.addPage([W, H]);
   header(page);
   y = H - 160;
-  T(page, "Insured:", LEFT, y);
-  LINE(page, LEFT + 50, y - 4, LEFT + 250);
-  TAG(page, "[text|insured_1_name|" + ROLE + "||195]", LEFT + 52, y - 2);
-  if (prefill.insured_1_name) T(page, prefill.insured_1_name, LEFT + 55, y);
-  T(page, "Insured:", LEFT + 285, y);
-  LINE(page, LEFT + 335, y - 4, RIGHT);
-  if (opts.use_signer2) {
-    TAG(page, "[text|insured_2_name|" + ROLE2 + "||215]", LEFT + 337, y - 2);
-    if (prefill.insured_2_name) T(page, prefill.insured_2_name, LEFT + 340, y);
-  }
+
+  fillField(page, "Insured:", p.insured_1_name, LEFT,       y, LEFT + 50,  LEFT + 250);
+  fillField(page, "Insured:", p.insured_2_name, LEFT + 285, y, LEFT + 335, RIGHT);
   y -= 70;
+
+  // Signature widgets — these are what the client interacts with
   T(page, "X", LEFT, y, 12, bold);
   LINE(page, LEFT + 12, y - 4, LEFT + 225);
   TAG(page, "[sig|sig_1|" + ROLE + "]", LEFT + 15, y - 2, 14);
+
   T(page, "X", LEFT + 285, y, 12, bold);
   LINE(page, LEFT + 297, y - 4, RIGHT);
   if (opts.use_signer2) {
@@ -2274,16 +2272,20 @@ async function buildLorPdf(opts = {}) {
     TAG(page, "[date|date_2|" + ROLE2 + "]",   LEFT + 440, y - 2, 14);
   }
   TAG(page, "[date|date_1|" + ROLE + "]", LEFT + 165, y - 2, 14);
+
   y -= 13;
   T(page, "Signature", LEFT,       y, 9);
   T(page, "Date",      LEFT + 165, y, 9);
   T(page, "Signature", LEFT + 285, y, 9);
   T(page, "Date",      LEFT + 440, y, 9);
+
   y -= 60;
   T(page, "Alexander Smith",            LEFT, y, 11); y -= 14;
   T(page, "407-755-7682",                LEFT, y, 11); y -= 14;
   T(page, "claims@smithadjusters.com",   LEFT, y, 11); y -= 14;
   T(page, "Public Adjuster - License # W844243 -   Firm License #G013237", LEFT, y, 11);
+
+  // Alex's signature is filled offline (printed line for hand-sign)
   y -= 50;
   T(page, "X", LEFT, y, 12, bold);
   LINE(page, LEFT + 12, y - 4, LEFT + 230);
@@ -2297,7 +2299,6 @@ async function buildLorPdf(opts = {}) {
 
   return Buffer.from(await pdf.save());
 }
-
 
 /* =================== POST /contracts/send-lor =================== */
 app.post("/contracts/send-lor", requireAuth, async (req, res) => {
