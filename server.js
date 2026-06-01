@@ -2033,6 +2033,347 @@ async function renderContractPdf(doc, opts) {
 /* =================== END AGREEMENT SUMMARY PAGE =================== */
 
 
+/* =================== LOR FROM SCRATCH =================== */
+// The 2025 Smith Adjusters Public Adjuster Contract, rendered
+// directly from code with Dropbox Sign text tags baked in.
+// No upload, no AI rebuild, no template plumbing.
+
+async function buildLorPdf(opts = {}) {
+  const prefill = opts.prefill || {};
+  const ROLE  = "signer1";          // primary insured
+  const ROLE2 = "signer2";          // optional second insured
+
+  const pdf  = await PDFDocument.create();
+  const helv = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+
+  const W = 612, H = 792;
+  const LEFT = 60, RIGHT = 552;
+  const BLACK = rgb(0, 0, 0);
+  const WHITE = rgb(1, 1, 1);                   // invisible text-tag color
+  const GREEN = rgb(0.49, 0.78, 0.27);
+
+  const T = (page, s, x, y, size = 11, font = helv, color = BLACK) =>
+    page.drawText(String(s == null ? "" : s), { x, y, size, font, color });
+
+  const TAG = (page, s, x, y, size = 8) =>
+    page.drawText(s, { x, y, size, font: helv, color: WHITE });
+
+  const LINE = (page, x1, y, x2, t = 0.5) =>
+    page.drawLine({ start: { x: x1, y }, end: { x: x2, y }, thickness: t, color: BLACK });
+
+  function brand(page, cx, cy, size = 18) {
+    const sw = bold.widthOfTextAtSize("SMITH ",     size);
+    const aw = bold.widthOfTextAtSize("ADJUSTERS",  size);
+    const total = sw + aw;
+    T(page, "SMITH ",    cx - total / 2,      cy, size, bold, BLACK);
+    T(page, "ADJUSTERS", cx - total / 2 + sw, cy, size, bold, GREEN);
+  }
+
+  function header(page) {
+    brand(page, W / 2, H - 55, 18);
+    const title = "Public Adjuster Contract";
+    const tw = bold.widthOfTextAtSize(title, 20);
+    T(page, title, W / 2 - tw / 2, H - 95, 20, bold);
+  }
+
+  function footer(page) {
+    const fy = 95;
+    const a = "SMITH ADJUSTERS";
+    const aw = bold.widthOfTextAtSize(a, 10);
+    T(page, a, W / 2 - aw / 2, fy, 10, bold);
+    const b = "478 E. Altamonte Drive Suite #108-311 Altamonte Springs Florida 32701";
+    const bw = helv.widthOfTextAtSize(b, 9);
+    T(page, b, W / 2 - bw / 2, fy - 14, 9);
+    const c = "407-755-7682   claims@smithadjusters.com   www.smithadjusters.com";
+    const cw = helv.widthOfTextAtSize(c, 9);
+    T(page, c, W / 2 - cw / 2, fy - 28, 9);
+
+    T(page, "Initials:", RIGHT - 130, 50, 10);
+    LINE(page, RIGHT - 95, 48, RIGHT);
+    TAG(page, "[init|req|" + ROLE + "]", RIGHT - 90, 50, 8);
+  }
+
+  /* ============ PAGE 1 ============ */
+  let page = pdf.addPage([W, H]);
+  header(page);
+  let y = H - 140;
+
+  T(page, "Insurance Company:", LEFT, y);
+  LINE(page, LEFT + 125, y - 3, LEFT + 280);
+  TAG(page, "[text|insurance_company|" + ROLE + "||150]", LEFT + 127, y - 1);
+  if (prefill.insurance_company) T(page, prefill.insurance_company, LEFT + 130, y);
+  T(page, "Policy #:", LEFT + 300, y);
+  LINE(page, LEFT + 350, y - 3, RIGHT);
+  TAG(page, "[text|policy_number|" + ROLE + "||135]", LEFT + 352, y - 1);
+  if (prefill.policy_number) T(page, prefill.policy_number, LEFT + 355, y);
+  y -= 28;
+
+  T(page, "Claim #:", LEFT, y);
+  LINE(page, LEFT + 55, y - 3, LEFT + 225);
+  TAG(page, "[text|claim_number|" + ROLE + "||165]", LEFT + 57, y - 1);
+  if (prefill.claim_number) T(page, prefill.claim_number, LEFT + 60, y);
+  T(page, "Date of Loss:", LEFT + 245, y);
+  LINE(page, LEFT + 325, y - 3, RIGHT);
+  TAG(page, "[text|date_of_loss|" + ROLE + "||130]", LEFT + 327, y - 1);
+  if (prefill.date_of_loss) T(page, prefill.date_of_loss, LEFT + 330, y);
+  y -= 28;
+
+  T(page, "[  ] Non-emergency",          LEFT,     y);
+  TAG(page, "[checkbox|non_emergency|"          + ROLE + "]", LEFT + 4,   y - 1);
+  T(page, "[  ] Emergency Supplemental", LEFT + 165, y);
+  TAG(page, "[checkbox|emergency_supplemental|" + ROLE + "]", LEFT + 169, y - 1);
+  T(page, "[  ] Reopen",                 LEFT + 360, y);
+  TAG(page, "[checkbox|reopen|"                 + ROLE + "]", LEFT + 364, y - 1);
+  y -= 28;
+
+  T(page, "The undersigned insured(s)", LEFT, y);
+  LINE(page, LEFT + 170, y - 3, LEFT + 345);
+  TAG(page, "[text|insured_name|" + ROLE + "||170]", LEFT + 172, y - 1);
+  T(page, "hereby retains Smith Adjusters to assist in the", LEFT + 352, y);
+  y -= 18;
+  T(page, "preparation, presentation, adjustment and negotiation of the claim for the loss which", LEFT, y);
+  y -= 18;
+  T(page, "occurred on or about the", LEFT, y);
+  LINE(page, LEFT + 150, y - 3, LEFT + 205);
+  TAG(page, "[text|loss_day|" + ROLE + "||50]", LEFT + 152, y - 1);
+  T(page, "day of", LEFT + 212, y);
+  LINE(page, LEFT + 250, y - 3, RIGHT);
+  TAG(page, "[text|loss_month_year|" + ROLE + "||295]", LEFT + 252, y - 1);
+  y -= 18;
+  T(page, "on the property located at", LEFT, y);
+  LINE(page, LEFT + 155, y - 3, RIGHT);
+  TAG(page, "[text|property_address|" + ROLE + "||335]", LEFT + 157, y - 1);
+  if (prefill.property_address) T(page, prefill.property_address, LEFT + 160, y);
+  y -= 22;
+
+  T(page, "Phone #:", LEFT, y);
+  LINE(page, LEFT + 55, y - 3, LEFT + 245);
+  TAG(page, "[text|phone|" + ROLE + "||185]", LEFT + 57, y - 1);
+  if (prefill.phone) T(page, prefill.phone, LEFT + 60, y);
+  T(page, "Email:", LEFT + 265, y);
+  LINE(page, LEFT + 305, y - 3, RIGHT);
+  TAG(page, "[text|email|" + ROLE + "||245]", LEFT + 307, y - 1);
+  if (prefill.email) T(page, prefill.email, LEFT + 310, y);
+  y -= 22;
+
+  T(page, "Caused by:", LEFT, y);
+  LINE(page, LEFT + 65, y - 3, LEFT + 265);
+  TAG(page, "[text|caused_by|" + ROLE + "||195]", LEFT + 67, y - 1);
+  if (prefill.caused_by) T(page, prefill.caused_by, LEFT + 70, y);
+  T(page, "Probable Damage:", LEFT + 280, y);
+  LINE(page, LEFT + 385, y - 3, RIGHT);
+  TAG(page, "[text|probable_damage|" + ROLE + "||165]", LEFT + 387, y - 1);
+  if (prefill.probable_damage) T(page, prefill.probable_damage, LEFT + 390, y);
+  y -= 30;
+
+  for (const ln of [
+    "The insured(s) assigns the benefits of this portion of their claim to Smith Adjusters for",
+    "services rendered. The insured(s) authorizes and directs their insurance company to",
+    "include Smith Adjusters as a payee on all payments made to or for the benefit of the",
+    "insured(s).",
+  ]) { T(page, ln, LEFT, y); y -= 16; }
+
+  y -= 8;
+  for (const ln of [
+    "In the event Smith Adjusters is required to take legal action to recover the fees due",
+    "pursuant to this contract, insured(s) agrees that Smith Adjusters will be entitled to recover",
+    "its reasonable attorney's fees and costs.",
+  ]) { T(page, ln, LEFT, y); y -= 16; }
+
+  footer(page);
+
+  /* ============ PAGE 2 ============ */
+  page = pdf.addPage([W, H]);
+  header(page);
+  y = H - 140;
+
+  T(page, "Pursuant to Florida Statute 817.234:", LEFT, y, 12, bold); y -= 20;
+  for (const ln of [
+    "Any person who, with the intent to injure, defraud, or",
+    "deceive an insurer or insured, prepares, presents, or causes",
+    "to be presented a proof of loss or estimate of cost. or repair",
+    "of damaged property in support of a claim under an",
+    "insurance policy knowing that the proof of loss or estimate of",
+    "claim or repairs contains any false, incomplete or misleading",
+    "information concerning any fact or thing material to the claim",
+    "commits a felony of the third degree punishable as provided",
+    "in s. 775.082, s. 775.803, or s. 775.084, Florida Statutes.",
+  ]) { T(page, ln, LEFT, y, 12); y -= 18; }
+
+  y -= 8;
+  T(page, "Pursuant to Florida Statute 626.854:", LEFT, y, 12, bold); y -= 20;
+  for (const ln of [
+    "You, the insured, may cancel this contract for any reason",
+    "without penalty or obligation to you within 10 days after the",
+    "date of this contract.  If this contract was entered into based on",
+    "events that are the subject of a declaration of a state of",
+    "emergency by the Governor, you may cancel this contract for",
+    "any reason without penalty or obligation to you within 30 days",
+    "after the date of loss or 10 days after the date on which the",
+    "contract is executed, whichever is longer.  You may also cancel",
+    "the contract without penalty or obligation to you if I,",
+  ]) { T(page, ln, LEFT, y, 12); y -= 18; }
+
+  footer(page);
+
+  /* ============ PAGE 3 ============ */
+  page = pdf.addPage([W, H]);
+  header(page);
+  y = H - 140;
+
+  for (const ln of [
+    "as your public adjuster, fail to provide you and your insurer a",
+    "copy of a written estimate within 60 days of the execution of",
+    "the contract, unless the failure to provide the estimate within 60",
+    "days is caused by factors beyond my control, in accordance",
+    "with s. 627.70131(5)(a)2., Florida Statutes. The 60-day",
+    "cancellation period for failure to provide a written estimate shall",
+    "cease on the date I have provided you with the written",
+    "estimate.  The notice of cancellation shall be provided to Alex",
+    "Smith, submitted in writing and sent by certified mail, return",
+    "receipt request, or other form of mailing that provides proof",
+    "thereof, at the address specified in the contract.",
+  ]) { T(page, ln, LEFT, y, 12); y -= 18; }
+
+  y -= 10;
+  T(page, "In consideration thereof, the undersigned insured(s) hereby", LEFT, y, 12); y -= 18;
+  T(page, "agrees to assign Smith Adjusters", LEFT, y, 12);
+  LINE(page, LEFT + 200, y - 3, LEFT + 250);
+  TAG(page, "[text|fee_percent|" + ROLE + "||45]", LEFT + 203, y - 1);
+  if (prefill.fee_percent) T(page, String(prefill.fee_percent), LEFT + 207, y, 12);
+  T(page, "% percent of the total", LEFT + 258, y, 12); y -= 18;
+  for (const ln of [
+    "proceeds recovered from the insurance company whether by",
+    "adjustment, mediation, appraisal, litigation or any alternate",
+    "dispute resolution, due when paid by the insurance company",
+    "and any processing expenses agreed upon.  The",
+    "compensation for public adjusting services will not exceed the",
+    "limitations provided by the law.",
+  ]) { T(page, ln, LEFT, y, 12); y -= 18; }
+
+  footer(page);
+
+  /* ============ PAGE 4 — Signatures ============ */
+  page = pdf.addPage([W, H]);
+  header(page);
+  y = H - 160;
+
+  T(page, "Insured:", LEFT, y);
+  LINE(page, LEFT + 50, y - 3, LEFT + 250);
+  TAG(page, "[text|insured_1_name|" + ROLE + "||195]", LEFT + 52, y - 1);
+  if (prefill.insured_1_name) T(page, prefill.insured_1_name, LEFT + 55, y);
+  T(page, "Insured:", LEFT + 285, y);
+  LINE(page, LEFT + 335, y - 3, RIGHT);
+  if (opts.use_signer2) {
+    TAG(page, "[text|insured_2_name|" + ROLE2 + "||215]", LEFT + 337, y - 1);
+    if (prefill.insured_2_name) T(page, prefill.insured_2_name, LEFT + 340, y);
+  }
+  y -= 55;
+
+  T(page, "X", LEFT, y, 12, bold);
+  LINE(page, LEFT + 12, y - 3, LEFT + 225);
+  TAG(page, "[sig|req|" + ROLE + "]", LEFT + 15, y - 2);
+
+  T(page, "X", LEFT + 285, y, 12, bold);
+  LINE(page, LEFT + 297, y - 3, RIGHT);
+  if (opts.use_signer2) {
+    TAG(page, "[sig|req|" + ROLE2 + "]", LEFT + 300, y - 2);
+    TAG(page, "[date|" + ROLE2 + "]",    LEFT + 440, y - 2);
+  }
+  TAG(page, "[date|" + ROLE + "]", LEFT + 165, y - 2);
+
+  y -= 13;
+  T(page, "Signature", LEFT,       y, 9);
+  T(page, "Date",      LEFT + 165, y, 9);
+  T(page, "Signature", LEFT + 285, y, 9);
+  T(page, "Date",      LEFT + 440, y, 9);
+
+  y -= 60;
+  T(page, "Alexander Smith",            LEFT, y, 11); y -= 14;
+  T(page, "407-755-7682",                LEFT, y, 11); y -= 14;
+  T(page, "claims@smithadjusters.com",   LEFT, y, 11); y -= 14;
+  T(page, "Public Adjuster - License # W844243 -   Firm License #G013237", LEFT, y, 11);
+
+  y -= 50;
+  T(page, "X", LEFT, y, 12, bold);
+  LINE(page, LEFT + 12, y - 3, LEFT + 230);
+  y -= 13;
+  T(page, "Signature", LEFT, y, 9);
+  y -= 30;
+  LINE(page, LEFT, y, LEFT + 230);
+  y -= 13;
+  T(page, "Date", LEFT, y, 9);
+
+  footer(page);
+
+  return Buffer.from(await pdf.save());
+}
+
+/* =================== POST /contracts/send-lor =================== */
+app.post("/contracts/send-lor", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    if (!DS_API_KEY) return res.status(500).json({ error: "E-signature is not configured" });
+    const body = req.body || {};
+    const signerName  = (body.signer_name  || "").trim();
+    const signerEmail = (body.signer_email || "").trim();
+    if (!signerName || !signerEmail) return res.status(400).json({ error: "Client name and email are required" });
+
+    const signer2Name  = String(body.signer2_name  || "").trim();
+    const signer2Email = String(body.signer2_email || "").trim();
+    const useSigner2   = !!signer2Email;
+
+    const pdfBytes = await buildLorPdf({
+      prefill: body.prefill || {},
+      use_signer2: useSigner2,
+    });
+
+    const claimName = body.claim_name || "";
+    const form = new FormData();
+    form.append("title",   "Letter of Representation" + (claimName ? " - " + claimName : ""));
+    form.append("subject", "Please sign your Letter of Representation");
+    form.append("message", "Please review and sign the Letter of Representation. A signed copy will be emailed to all parties once complete.");
+    form.append("signers[0][name]",          signerName);
+    form.append("signers[0][email_address]", signerEmail);
+    form.append("signers[0][order]",         "0");
+    if (useSigner2) {
+      form.append("signers[1][name]",          signer2Name || "Second Insured");
+      form.append("signers[1][email_address]", signer2Email);
+      form.append("signers[1][order]",         "1");
+    }
+    form.append("cc_email_addresses[0]", req.user.email);
+    form.append("test_mode",      "1");
+    form.append("use_text_tags",  "1");
+    form.append("hide_text_tags", "1");
+    form.append("file[0]", new Blob([pdfBytes], { type: "application/pdf" }), "LOR.pdf");
+
+    const dsRes = await fetch(DS_BASE + "/signature_request/send", {
+      method: "POST",
+      headers: { "Authorization": dsAuthHeader() },
+      body: form,
+    });
+    const dsJson = await dsRes.json().catch(() => ({}));
+    if (!dsRes.ok) {
+      console.error("[contracts/send-lor] provider error", dsRes.status, JSON.stringify(dsJson));
+      const msg = (dsJson && dsJson.error && dsJson.error.error_msg) || "E-signature provider rejected the request";
+      return res.status(502).json({ error: msg });
+    }
+    const sr = dsJson.signature_request || {};
+    const srId = sr.signature_request_id || "";
+    const ins = dsRowsOf(await q(
+      "INSERT INTO contracts (user_id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status, price) VALUES ($1,$2,$3,$4,$5,$6,'sent',$7) RETURNING id",
+      [req.user.id, body.claim_local_id || null, claimName || null, signerName, signerEmail, srId, body.price || null]
+    ));
+    res.json({ ok: true, id: ins[0] ? ins[0].id : null, signature_request_id: srId, status: "sent" });
+  } catch (e) {
+    console.error("[contracts/send-lor]", e);
+    res.status(500).json({ error: "Could not send LOR" });
+  }
+});
+/* ================= END LOR FROM SCRATCH ================= */
+
+
 /* ===================== ROOF MEASUREMENT (Google Solar API) ===================== */
 async function geocodeUS(address) {
   if (!address || !String(address).trim()) return null;
