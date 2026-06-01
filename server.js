@@ -1395,77 +1395,121 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     await ensureContractsSchema();
     if (!DS_API_KEY) return res.status(500).json({ error: "E-signature is not configured" });
     const body = req.body || {};
+    const claimName = (body.claim_name || "").toString();
+    const claimLocalId = body.claim_local_id || null;
     const signerName = (body.signer_name || "").trim();
     const signerEmail = (body.signer_email || "").trim();
+    const useClient2 = !!body.use_second_client;
+    const signer2Name = (body.signer2_name || "").trim();
+    const signer2Email = (body.signer2_email || "").trim();
+    const needsAdjuster = !!body.needs_adjuster_sign;
+    const templateId = body.template_id || null;
+    const fieldValues = (body.field_values && typeof body.field_values === "object") ? body.field_values : {};
     if (!signerName || !signerEmail) return res.status(400).json({ error: "Client name and email are required" });
-    const tpl = dsRowsOf(await q("SELECT id, filename, pdf_base64, field_map, doc_json FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$1))", [await templateOwnerIdFor(req.user), ((req.body && req.body.contract_id) ? parseInt(req.body.contract_id, 10) : null)]));
+
+    // Load the template — use the ORIGINAL pdf_base64 (no AI rebuild = no font/spacing drift)
+    const tpl = dsRowsOf(await q("SELECT id, filename, pdf_base64, field_map FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts S WHERE S.user_id=$1)) ORDER BY id DESC LIMIT 1", [req.user.id, templateId]));
     if (!tpl.length) return res.status(400).json({ error: "Upload your contract first" });
-    const pdfBuf = Buffer.from(tpl[0].pdf_base64, "base64");
-    let docJson = null;
-    try { docJson = tpl[0].doc_json ? JSON.parse(tpl[0].doc_json) : null; } catch (e) { docJson = null; }
-    let fieldMap = [];
-    try { fieldMap = tpl[0].field_map ? JSON.parse(tpl[0].field_map) : []; } catch (e) { fieldMap = []; }
-    let _hasClient2 = false, _needsAdjuster = false;
+    const originalPdfB64 = tpl[0].pdf_base64;
+    if (!originalPdfB64) return res.status(400).json({ error: "Contract template has no PDF file" });
+    const b64 = (originalPdfB64.indexOf(",") >= 0) ? originalPdfB64.split(",").pop() : originalPdfB64;
+    let originalBuf;
+    try { originalBuf = Buffer.from(b64, "base64"); }
+    catch (e) { return res.status(500).json({ error: "Could not decode contract PDF" }); }
+
+    // Load with pdf-lib so we can: (a) overlay auto-filled text values, (b) read page dimensions for field positioning
+    let pdfDoc, pages, pageCount = 1, pageW = 612, pageH = 792;
     try {
-      (docJson && Array.isArray(docJson.sections) ? docJson.sections : []).forEach(function (sx) {
-        if (!sx) return;
-        var _isS = sx.kind === "signature" || (sx.kind === "field" && (sx.field_id === "signature" || sx.field_id === "initials" || sx.field_id === "date_signed"));
-        if (!_isS) return;
-        if (sx.signer === "client2") _hasClient2 = true;
-        if (sx.signer === "adjuster") _needsAdjuster = true;
-      });
-    } catch (e) {}
-    var _signer2Name = String(body.signer2_name || "").trim();
-    var _signer2Email = String(body.signer2_email || "").trim();
-    var _useClient2 = _hasClient2 && !!_signer2Email;
-    var signerMap = { client: "signer1", client2: "signer1", adjuster: "signer1" };
-    var _mpos = 1;
-    if (_useClient2) { signerMap.client2 = "signer" + (_mpos + 1); _mpos++; }
-    if (_needsAdjuster) { signerMap.adjuster = "signer" + (_mpos + 1); _mpos++; }
-    let mergedBuf;
-    try {
-      if (docJson && Array.isArray(docJson.sections) && docJson.sections.length) { mergedBuf = await renderContractPdf(docJson, { mode: "filled", body: body, user: req.user, signer_map: signerMap }); }
-      else if (Array.isArray(fieldMap) && fieldMap.length) { mergedBuf = await fillContractPdf(pdfBuf, fieldMap, body, req.user); }
-      else { mergedBuf = await buildAgreementPdf(pdfBuf, body, req.user); }
+      pdfDoc = await PDFDocument.load(originalBuf);
+      pages = pdfDoc.getPages();
+      pageCount = pages.length;
+      if (pages[0]) { const sz = pages[0].getSize(); pageW = sz.width; pageH = sz.height; }
+    } catch (e) {
+      console.error("[contracts/send] could not parse PDF", e);
+      return res.status(500).json({ error: "Contract PDF appears corrupted" });
     }
-    catch (e) { console.error("[contracts/send] merge", e); return res.status(500).json({ error: "Could not build the agreement PDF. Try re-uploading your contract." }); }
+
+    // Overlay auto-filled text values onto the original PDF (preserves everything else byte-for-byte)
+    let fieldMap = [];
+    try {
+      const raw = tpl[0].field_map;
+      fieldMap = (typeof raw === "object" && raw) ? (Array.isArray(raw) ? raw : (raw.fields || [])) : (raw ? (Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : (JSON.parse(raw).fields || [])) : []);
+    } catch (e) { fieldMap = []; }
+    let helvetica = null;
+    try { helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica); } catch (e) {}
+    for (const f of fieldMap) {
+      if (!f || typeof f !== "object") continue;
+      const fid = f.id || f.name || "";
+      const val = fieldValues[fid];
+      if (val == null || val === "") continue;
+      const ftype = (f.type || "text").toLowerCase();
+      if (ftype !== "text" && ftype !== "string") continue;
+      const pageIdx = Math.max(0, Math.min(pageCount - 1, (f.page || 1) - 1));
+      const px = +f.x || 0;
+      const py = +f.y || 0;
+      const fs = +f.fontSize || 11;
+      try { pages[pageIdx].drawText(String(val), { x: px, y: py, size: fs, font: helvetica || undefined }); } catch (e) {}
+    }
+    const filledBuf = Buffer.from(await pdfDoc.save());
+
+    // Build the signer list
+    const signers = [{ name: signerName, email: signerEmail, order: 0 }];
+    let sp = 1;
+    if (useClient2 && signer2Email) { signers.push({ name: signer2Name || "Second Signer", email: signer2Email, order: sp }); sp++; }
+    if (needsAdjuster) { signers.push({ name: req.user.full_name || req.user.firm_name || "Public Adjuster", email: req.user.email, order: sp }); sp++; }
+
+    // Build form_fields_per_document — Dropbox Sign overlays these as click-to-fill widgets on the original PDF.
+    // (a) Initials at bottom-right of every page (signer 0 — primary client)
+    // (b) Signature + date on the last page, also signer 0
+    // (c) Optional second client and/or adjuster signature on the last page
+    const fields = [];
+    let apiSeq = 0;
+    const nextId = () => "field_" + (++apiSeq);
+    const INIT_W = 70, INIT_H = 22;
+    const SIG_W = 200, SIG_H = 40;
+    const DATE_W = 110, DATE_H = 24;
+    for (let p = 1; p <= pageCount; p++) {
+      fields.push({ api_id: nextId(), type: "initials", page: p, x: pageW - INIT_W - 18, y: 18, width: INIT_W, height: INIT_H, required: true, signer: 0 });
+    }
+    // Last page signatures
+    const lastPage = pageCount;
+    fields.push({ api_id: nextId(), type: "signature", page: lastPage, x: 50, y: 120, width: SIG_W, height: SIG_H, required: true, signer: 0 });
+    fields.push({ api_id: nextId(), type: "date_signed", page: lastPage, x: 50 + SIG_W + 20, y: 120, width: DATE_W, height: DATE_H, required: true, signer: 0 });
+    if (useClient2 && signer2Email) {
+      fields.push({ api_id: nextId(), type: "signature", page: lastPage, x: 50, y: 70, width: SIG_W, height: SIG_H, required: true, signer: 1 });
+      fields.push({ api_id: nextId(), type: "date_signed", page: lastPage, x: 50 + SIG_W + 20, y: 70, width: DATE_W, height: DATE_H, required: true, signer: 1 });
+    }
+    if (needsAdjuster) {
+      const adjSignerIdx = signers.length - 1;
+      fields.push({ api_id: nextId(), type: "signature", page: lastPage, x: pageW - SIG_W - 50, y: 120, width: SIG_W, height: SIG_H, required: true, signer: adjSignerIdx });
+      fields.push({ api_id: nextId(), type: "date_signed", page: lastPage, x: pageW - SIG_W - 50, y: 90, width: DATE_W, height: DATE_H, required: true, signer: adjSignerIdx });
+    }
+
+    // Build multipart form for Dropbox Sign /signature_request/send
     const form = new FormData();
-    const claimName = body.claim_name || "";
     form.append("title", "Roofing Agreement" + (claimName ? " - " + claimName : ""));
     form.append("subject", "Please sign your roofing agreement");
     form.append("message", "Please review and sign your roofing agreement. A signed copy will be emailed to all parties once complete.");
-    form.append("signers[0][name]", signerName);
-    form.append("signers[0][email_address]", signerEmail);
-    form.append("signers[0][order]", "0");
-    let _sp = 1;
-    if (_useClient2) {
-      form.append("signers[" + _sp + "][name]", _signer2Name || "Second Signer");
-      form.append("signers[" + _sp + "][email_address]", _signer2Email);
-      form.append("signers[" + _sp + "][order]", String(_sp));
-      _sp++;
-    }
-    if (_needsAdjuster) {
-      form.append("signers[" + _sp + "][name]", req.user.full_name || req.user.firm_name || "Public Adjuster");
-      form.append("signers[" + _sp + "][email_address]", req.user.email);
-      form.append("signers[" + _sp + "][order]", String(_sp));
-      _sp++;
-    } else {
-      form.append("cc_email_addresses[0]", req.user.email);
-    }
+    signers.forEach((s, i) => {
+      form.append("signers[" + i + "][name]", s.name);
+      form.append("signers[" + i + "][email_address]", s.email);
+      form.append("signers[" + i + "][order]", String(s.order));
+    });
+    if (!needsAdjuster) form.append("cc_email_addresses[0]", req.user.email);
     form.append("test_mode", "1");
-    form.append("use_text_tags", "1");
-    form.append("hide_text_tags", "1");
-    form.append("file[0]", new Blob([mergedBuf], { type: "application/pdf" }), "roofing-agreement.pdf");
-    const dsRes = await fetch(DS_BASE + "/signature_request/send", { method: "POST", headers: { "Authorization": dsAuthHeader() }, body: form });
-    const dsJson = await dsRes.json().catch(() => ({}));
+    form.append("file[0]", new Blob([filledBuf], { type: "application/pdf" }), tpl[0].filename || "agreement.pdf");
+    // form_fields_per_document is a JSON-encoded array of arrays (one inner array per file in this request)
+    form.append("form_fields_per_document", JSON.stringify([fields]));
+
+    const dsRes = await fetch("https://api.hellosign.com/v3/signature_request/send", { method: "POST", headers: { "Authorization": dsAuthHeader() }, body: form });
+    const dsJson = await dsRes.json();
     if (!dsRes.ok) {
       console.error("[contracts/send] provider error", dsRes.status, JSON.stringify(dsJson));
-      const msg = (dsJson && dsJson.error && dsJson.error.error_msg) || "E-signature provider rejected the request";
+      const msg = (dsJson && dsJson.error && (dsJson.error.error_msg || dsJson.error.message)) || "E-sign provider rejected the request";
       return res.status(502).json({ error: msg });
     }
-    const sr = dsJson.signature_request || {};
-    const srId = sr.signature_request_id || "";
-    const ins = dsRowsOf(await q("INSERT INTO contracts (user_id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status, price) VALUES ($1,$2,$3,$4,$5,$6,'sent',$7) RETURNING id", [req.user.id, body.claim_local_id || null, claimName || null, signerName, signerEmail, srId, body.price || null]));
+    const srId = dsJson.signature_request && dsJson.signature_request.signature_request_id;
+    const ins = dsRowsOf(await q("INSERT INTO contracts (user_id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status, price) VALUES ($1,$2,$3,$4,$5,$6,'sent',$7) RETURNING id", [req.user.id, claimLocalId, claimName, signerName, signerEmail, srId, body.price || null]));
     res.json({ ok: true, id: ins[0] ? ins[0].id : null, signature_request_id: srId, status: "sent" });
   } catch (e) {
     console.error("[contracts/send]", e);
