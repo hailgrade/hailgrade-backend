@@ -2327,8 +2327,22 @@ app.post("/contracts/send-lor", requireAuth, async (req, res) => {
     }
     form.append("cc_email_addresses[0]", req.user.email);
     form.append("test_mode",      "1");
-    form.append("use_text_tags",  "1");
-    form.append("hide_text_tags", "1");
+    // Explicit widget placement (top-left origin, PDF points). No text-tag parsing.
+    const lorFields = [
+      { api_id: "init_p1", name: "Initial p1", type: "initials",    x: 462, y: 632, width: 90,  height: 25, signer: 0, page: 1, required: true },
+      { api_id: "init_p2", name: "Initial p2", type: "initials",    x: 462, y: 632, width: 90,  height: 25, signer: 0, page: 2, required: true },
+      { api_id: "init_p3", name: "Initial p3", type: "initials",    x: 462, y: 632, width: 90,  height: 25, signer: 0, page: 3, required: true },
+      { api_id: "init_p4", name: "Initial p4", type: "initials",    x: 462, y: 632, width: 90,  height: 25, signer: 0, page: 4, required: true },
+      { api_id: "sig_1",   name: "Signature",  type: "signature",   x: 72,  y: 212, width: 150, height: 25, signer: 0, page: 4, required: true },
+      { api_id: "date_1",  name: "Date",       type: "date_signed", x: 225, y: 212, width: 60,  height: 25, signer: 0, page: 4, required: true },
+    ];
+    if (useSigner2) {
+      lorFields.push(
+        { api_id: "sig_2",  name: "Signature 2", type: "signature",   x: 357, y: 212, width: 150, height: 25, signer: 1, page: 4, required: true },
+        { api_id: "date_2", name: "Date 2",      type: "date_signed", x: 500, y: 212, width: 52,  height: 25, signer: 1, page: 4, required: true }
+      );
+    }
+    form.append("form_fields_per_document", JSON.stringify([lorFields]));
     form.append("file[0]", new Blob([pdfBytes], { type: "application/pdf" }), "LOR.pdf");
 
     const dsRes = await fetch(DS_BASE + "/signature_request/send", {
