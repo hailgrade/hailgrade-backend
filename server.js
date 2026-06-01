@@ -1010,6 +1010,101 @@ app.post('/analyze', requireAuth, requireActiveSubscription, async (req, res) =>
   }
 });
 
+
+// ============ Supplement detector ============
+app.post('/supplements/analyze', requireAuth, requireActiveSubscription, async (req, res) => {
+  try {
+    const { pdf_base64, filename, checklist, claim } = req.body || {};
+    if (!pdf_base64) return res.status(400).json({ error: 'pdf_base64 required' });
+    if (!Array.isArray(checklist) || !checklist.length) {
+      return res.status(400).json({ error: 'checklist required' });
+    }
+
+    const claimCtx = claim ? [
+      claim.address ? `Property: ${claim.address}` : null,
+      claim.carrier ? `Carrier: ${claim.carrier}` : null,
+      claim.peril   ? `Peril: ${claim.peril}` : null,
+      claim.roofSquares ? `Approx roof size: ${claim.roofSquares} squares` : null,
+    ].filter(Boolean).join('\n') : '';
+
+    const checklistText = checklist.map(function(c, i) {
+      return (i+1) + '. ' + c.name + ' (id: ' + c.id + ', category: ' + c.cat + ')\n'
+        + '   Typical range: $' + (c.estLow || 0) + '-$' + (c.estHigh || 0) + '\n'
+        + '   Why it applies: ' + (c.rationale || '') + '\n'
+        + '   Keywords to detect in estimate: ' + ((c.keywords || []).join(', '));
+    }).join('\n\n');
+
+    const systemPrompt = 'You are an expert Public Adjuster specializing in supplemental claims for residential roof damage in the US insurance industry. You analyze carrier estimate PDFs and identify line items the carrier OMITTED that should be demanded.\n\n'
+      + 'For each MISSING item from the provided checklist:\n'
+      + '  - Estimate a specific dollar value based on the typical range, roof size if known, and context\n'
+      + '  - Provide a 1-2 sentence rationale for why it applies here\n'
+      + '  - Add specific notes when you can (e.g., "3 turbines visible in photos")\n\n'
+      + 'For PRESENT items: just list their id.\n\n'
+      + 'Return ONLY valid JSON in this exact shape:\n'
+      + '{\n'
+      + '  "missing": [{"id":"...","name":"...","cat":"...","estValue":123,"rationale":"...","notes":"..."}],\n'
+      + '  "present": ["id1","id2"]\n'
+      + '}\n\n'
+      + 'Rules:\n'
+      + '- Do NOT flag items already itemized in the estimate.\n'
+      + '- Do NOT invent items outside the checklist.\n'
+      + '- Be conservative: only flag items you are confident are missing.\n'
+      + '- estValue must be a positive integer (USD).';
+
+    const userPrompt = (claimCtx ? ('Claim context:\n' + claimCtx + '\n\n') : '')
+      + 'Supplement checklist to scan for:\n\n' + checklistText + '\n\n'
+      + 'Analyze the attached carrier estimate PDF and return the JSON.';
+
+    const messages = [{
+      role: 'user',
+      content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf_base64 } },
+        { type: 'text', text: userPrompt },
+      ],
+    }];
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: messages,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('[supplements/analyze] anthropic returned', response.status, errText.slice(0, 500));
+      return res.status(502).json({ error: 'AI analysis failed', detail: errText.slice(0, 500) });
+    }
+
+    const data = await response.json();
+    const text = (data.content && data.content[0] && data.content[0].text) || '';
+
+    let parsed = null;
+    try {
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      parsed = JSON.parse(jsonMatch ? jsonMatch[0] : text);
+    } catch (e) {
+      console.error('[supplements/analyze] JSON parse failed', text.slice(0, 500));
+      return res.status(500).json({ error: 'AI response was not valid JSON', raw: text.slice(0, 1000) });
+    }
+
+    return res.json({
+      missing: Array.isArray(parsed.missing) ? parsed.missing : [],
+      present: Array.isArray(parsed.present) ? parsed.present : [],
+    });
+  } catch (err) {
+    console.error('[supplements/analyze]', err);
+    return res.status(500).json({ error: err.message || 'Supplement analysis failed' });
+  }
+});
 // ============ Stripe billing ============
 app.post('/billing/checkout', requireAuth, async (req, res) => {
   try {
