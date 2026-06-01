@@ -2078,8 +2078,15 @@ async function buildLorPdf(opts = {}) {
     const tw = bold.widthOfTextAtSize(title, 20);
     T(page, title, W / 2 - tw / 2, H - 95, 20, bold);
   }
+  // Initials block lives ABOVE the footer (away from the page edge),
+  // and uses the explicit 4-segment text-tag form so each page is its own widget.
   function footer(page, pn) {
-    const fy = 95;
+    // Initials line ~130pt above the bottom — well clear of the margin
+    T(page, "Initials:", RIGHT - 145, 132, 11, bold);
+    LINE(page, RIGHT - 90, 130, RIGHT);
+    TAG(page, "[init|init_p" + pn + "|" + ROLE + "|req]", RIGHT - 85, 134, 16);
+    // Address footer below the initials
+    const fy = 90;
     const a = "SMITH ADJUSTERS";
     const aw = bold.widthOfTextAtSize(a, 10);
     T(page, a, W / 2 - aw / 2, fy, 10, bold);
@@ -2089,42 +2096,31 @@ async function buildLorPdf(opts = {}) {
     const c = "407-755-7682   claims@smithadjusters.com   www.smithadjusters.com";
     const cw = helv.widthOfTextAtSize(c, 9);
     T(page, c, W / 2 - cw / 2, fy - 28, 9);
-    T(page, "Initials:", RIGHT - 130, 45, 10);
-    LINE(page, RIGHT - 95, 43, RIGHT);
-    TAG(page, "[init|init_p" + pn + "|" + ROLE + "]", RIGHT - 90, 47, 14);
   }
 
-  // helper: draw labelled static text with the line under it
   function fillField(page, label, value, x, y, lineStart, lineEnd) {
     T(page, label, x, y);
     LINE(page, lineStart, y - 4, lineEnd);
     if (value) T(page, String(value), lineStart + 3, y);
   }
-
-  // checkbox: type is "non_emergency" | "emergency_supplemental" | "reopen"
   function cbox(page, label, selected, x, y) {
     T(page, selected ? "[X] " : "[  ] ", x, y, 11, bold);
     T(page, label, x + 22, y);
   }
-
-  // try to split a date string into "day" and "month/year"
   function splitDate(dateStr) {
     if (!dateStr) return { day: "", monthYear: "" };
     const s = String(dateStr).trim();
-    // ISO like 2026-06-15
     let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
     if (m) {
       const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
       return { day: String(parseInt(m[3], 10)), monthYear: months[parseInt(m[2], 10) - 1] + " " + m[1] };
     }
-    // mm/dd/yyyy
     m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
     if (m) {
       const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
       const yr = m[3].length === 2 ? "20" + m[3] : m[3];
       return { day: String(parseInt(m[2], 10)), monthYear: months[parseInt(m[1], 10) - 1] + " " + yr };
     }
-    // fallback: put the whole thing in monthYear
     return { day: "", monthYear: s };
   }
   const dol = splitDate(p.date_of_loss);
@@ -2146,7 +2142,6 @@ async function buildLorPdf(opts = {}) {
   cbox(page, "Reopen",                 p.claim_type === "reopen",                 LEFT + 360, y);
   y -= 32;
 
-  // "The undersigned insured(s) ___ hereby retains..."
   T(page, "The undersigned insured(s)", LEFT, y);
   LINE(page, LEFT + 170, y - 4, LEFT + 345);
   if (p.insured_name) T(page, p.insured_name, LEFT + 173, y);
@@ -2260,18 +2255,17 @@ async function buildLorPdf(opts = {}) {
   fillField(page, "Insured:", p.insured_2_name, LEFT + 285, y, LEFT + 335, RIGHT);
   y -= 70;
 
-  // Signature widgets — these are what the client interacts with
   T(page, "X", LEFT, y, 12, bold);
   LINE(page, LEFT + 12, y - 4, LEFT + 225);
-  TAG(page, "[sig|sig_1|" + ROLE + "]", LEFT + 15, y - 2, 14);
+  TAG(page, "[sig|sig_1|" + ROLE + "|req]", LEFT + 15, y - 2, 14);
 
   T(page, "X", LEFT + 285, y, 12, bold);
   LINE(page, LEFT + 297, y - 4, RIGHT);
   if (opts.use_signer2) {
-    TAG(page, "[sig|sig_2|" + ROLE2 + "]", LEFT + 300, y - 2, 14);
-    TAG(page, "[date|date_2|" + ROLE2 + "]",   LEFT + 440, y - 2, 14);
+    TAG(page, "[sig|sig_2|" + ROLE2 + "|req]", LEFT + 300, y - 2, 14);
+    TAG(page, "[date|date_2|" + ROLE2 + "|req]",   LEFT + 440, y - 2, 14);
   }
-  TAG(page, "[date|date_1|" + ROLE + "]", LEFT + 165, y - 2, 14);
+  TAG(page, "[date|date_1|" + ROLE + "|req]", LEFT + 165, y - 2, 14);
 
   y -= 13;
   T(page, "Signature", LEFT,       y, 9);
@@ -2285,7 +2279,6 @@ async function buildLorPdf(opts = {}) {
   T(page, "claims@smithadjusters.com",   LEFT, y, 11); y -= 14;
   T(page, "Public Adjuster - License # W844243 -   Firm License #G013237", LEFT, y, 11);
 
-  // Alex's signature is filled offline (printed line for hand-sign)
   y -= 50;
   T(page, "X", LEFT, y, 12, bold);
   LINE(page, LEFT + 12, y - 4, LEFT + 230);
