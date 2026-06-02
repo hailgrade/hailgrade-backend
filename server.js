@@ -533,7 +533,10 @@ app.get('/events', requireAuth, async (req, res) => {
     }
     // Fetch and merge Google Calendar events from primary calendar (best-effort â silent on failure).
     let gcalRows = [];
+    let gcalError = null;
+    let gcalRan = false;
     try {
+      gcalRan = true;
       const accessToken = await googleAccessToken(req.user.id);
       if (accessToken) {
         const gParams = new URLSearchParams({
@@ -567,10 +570,14 @@ app.get('/events', requireAuth, async (req, res) => {
               status: g.status || null
             };
           });
+        } else {
+          gcalError = 'http ' + gResp.status + ': ' + (await gResp.text().catch(() => '')).slice(0, 200);
         }
+      } else {
+        gcalError = 'no_access_token';
       }
-    } catch (e) { /* user not connected to Google or refresh failed â silently skip */ }
-    res.json({ events: [...gcalRows, ...rows] });
+    } catch (gErr) { gcalError = (gErr && (gErr.message || String(gErr))) || 'unknown'; }
+    res.json({ events: [...gcalRows, ...rows], _debug: { gcal_count: gcalRows.length, gcal_error: gcalError, gcal_ran: gcalRan, gcal_user_id: req.user.id } });
 
   } catch (err) {
     console.error('[events GET]', err);
