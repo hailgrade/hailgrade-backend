@@ -531,7 +531,47 @@ app.get('/events', requireAuth, async (req, res) => {
         rows = await q('SELECT * FROM events WHERE user_id = $1 AND starts_at >= $2 AND starts_at <= $3 ORDER BY starts_at ASC', [req.user.id, start, end]);
       }
     }
-    res.json({ events: rows });
+    // Fetch and merge Google Calendar events from primary calendar (best-effort â silent on failure).
+    let gcalRows = [];
+    try {
+      const accessToken = await googleAccessToken(req.user.id);
+      if (accessToken) {
+        const gParams = new URLSearchParams({
+          timeMin: new Date(start).toISOString(),
+          timeMax: new Date(end).toISOString(),
+          singleEvents: 'true',
+          orderBy: 'startTime',
+          maxResults: '250'
+        });
+        const gResp = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events?' + gParams.toString(), {
+          headers: { authorization: 'Bearer ' + accessToken }
+        });
+        if (gResp.ok) {
+          const gData = await gResp.json();
+          gcalRows = ((gData && gData.items) || []).map(function(g) {
+            const gs = (g.start && (g.start.dateTime || g.start.date)) || null;
+            const ge = (g.end && (g.end.dateTime || g.end.date)) || null;
+            return {
+              id: 'gcal_' + (g.id || ''),
+              user_id: req.user.id,
+              claim_local_id: null,
+              title: g.summary || '(no title)',
+              notes: g.description || null,
+              location: g.location || null,
+              starts_at: gs,
+              ends_at: ge,
+              all_day: !!(g.start && g.start.date && !g.start.dateTime),
+              source: 'google',
+              google_event_id: g.id || null,
+              google_html_link: g.htmlLink || null,
+              status: g.status || null
+            };
+          });
+        }
+      }
+    } catch (e) { /* user not connected to Google or refresh failed â silently skip */ }
+    res.json({ events: [...gcalRows, ...rows] });
+
   } catch (err) {
     console.error('[events GET]', err);
     res.status(500).json({ error: 'list_failed', detail: err.message });
