@@ -554,8 +554,8 @@ app.get('/events', requireAuth, async (req, res) => {
             method: 'POST',
             headers: { 'content-type': 'application/x-www-form-urlencoded' },
             body: new URLSearchParams({
-              client_id: process.env.GOOGLE_CLIENT_ID || '',
-              client_secret: process.env.GOOGLE_CLIENT_SECRET || '',
+              client_id: process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || '',
+              client_secret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET || '',
               refresh_token: urow.google_refresh_token,
               grant_type: 'refresh_token'
             }).toString()
