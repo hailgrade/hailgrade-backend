@@ -618,6 +618,321 @@ app.get('/events', requireAuth, async (req, res) => {
   }
 });
 
+// ===== (this comment will be replaced) =====
+// ============================================================
+// Gmail email integration — three endpoints:
+//   GET  /emails/search?name=&address=&claim_number=&policy_number=&carrier=&insured_email=&days=30
+//        Returns up to 30 most-recent matching emails (metadata only)
+//   GET  /emails/:msgId
+//        Returns full email body (text + html) + attachment metadata
+//   POST /emails/:msgId/extract
+//        Claude reads the email, returns structured field updates for the claim
+//
+// Reuses the inline Google-token lookup pattern from the /events fix so it
+// doesn't depend on any helper that might be out of scope.
+// Drop this whole block somewhere with the other app.get/app.post routes.
+// ============================================================
+
+async function _ampleGoogleToken(userId) {
+  const ur = await pool.query(
+    "SELECT google_access_token, google_refresh_token, google_token_expiry FROM users WHERE id = $1",
+    [userId]
+  );
+  const urow = ur && ur.rows && ur.rows[0];
+  if (!urow || !urow.google_refresh_token) return null;
+  let accessToken = urow.google_access_token;
+  const expiry = Number(urow.google_token_expiry || 0);
+  const now = Date.now();
+  if (accessToken && expiry - 60000 > now) return accessToken;
+  // Refresh
+  const rResp = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || '',
+      client_secret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET || '',
+      refresh_token: urow.google_refresh_token,
+      grant_type: 'refresh_token'
+    }).toString()
+  });
+  if (!rResp.ok) {
+    console.error('[gmail] token refresh failed', rResp.status, await rResp.text().catch(() => ''));
+    return null;
+  }
+  const rData = await rResp.json();
+  accessToken = rData.access_token;
+  const newExpiry = now + (Number(rData.expires_in || 3600) * 1000);
+  await pool.query(
+    'UPDATE users SET google_access_token = $1, google_token_expiry = $2 WHERE id = $3',
+    [accessToken, newExpiry, userId]
+  );
+  return accessToken;
+}
+
+// Header extraction helper — Gmail returns headers as [{name, value}, ...]
+function _headerVal(headers, name) {
+  if (!headers) return '';
+  const h = headers.find(x => (x.name || '').toLowerCase() === name.toLowerCase());
+  return h ? (h.value || '') : '';
+}
+
+// Decode base64url body — Gmail uses URL-safe base64
+function _decodeB64Url(s) {
+  if (!s) return '';
+  const padded = s.replace(/-/g, '+').replace(/_/g, '/');
+  try { return Buffer.from(padded, 'base64').toString('utf-8'); }
+  catch (e) { return ''; }
+}
+
+// Walk Gmail's MIME payload tree to find body parts and attachments
+function _extractParts(payload, out) {
+  if (!payload) return;
+  if (payload.body && payload.body.data) {
+    const mime = (payload.mimeType || '').toLowerCase();
+    const text = _decodeB64Url(payload.body.data);
+    if (mime === 'text/plain') out.text = (out.text || '') + text;
+    else if (mime === 'text/html') out.html = (out.html || '') + text;
+  }
+  // Attachments — bodies referenced by attachmentId
+  if (payload.filename && payload.filename.length && payload.body && payload.body.attachmentId) {
+    out.attachments = out.attachments || [];
+    out.attachments.push({
+      attachment_id: payload.body.attachmentId,
+      filename: payload.filename,
+      mime_type: payload.mimeType || 'application/octet-stream',
+      size: payload.body.size || 0
+    });
+  }
+  if (payload.parts && payload.parts.length) {
+    for (const p of payload.parts) _extractParts(p, out);
+  }
+}
+
+// GET /emails/search — find emails matching a claim
+app.get('/emails/search', requireAuth, async (req, res) => {
+  try {
+    const accessToken = await _ampleGoogleToken(req.user.id);
+    if (!accessToken) {
+      return res.json({ messages: [], _debug: { error: 'not_connected' } });
+    }
+    // Build the Gmail q string — broad match across name/address/claim#/policy#/carrier/email
+    const terms = [];
+    const add = (val) => {
+      const v = String(val || '').trim();
+      if (v) {
+        // Quote multi-word values so Gmail searches them as a phrase
+        if (/\s/.test(v)) terms.push('"' + v.replace(/"/g, '') + '"');
+        else terms.push(v);
+      }
+    };
+    add(req.query.name);
+    add(req.query.address);
+    add(req.query.claim_number);
+    add(req.query.policy_number);
+    add(req.query.carrier);
+    if (req.query.insured_email) {
+      const em = String(req.query.insured_email).trim();
+      if (em) terms.push('(from:' + em + ' OR to:' + em + ')');
+    }
+    if (!terms.length) {
+      return res.json({ messages: [], _debug: { error: 'no_search_terms' } });
+    }
+    const days = parseInt(req.query.days || '60', 10) || 60;
+    const q = '(' + terms.join(' OR ') + ') newer_than:' + days + 'd';
+    // Step 1: list matching message IDs (max 30)
+    const listResp = await fetch(
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=30&q=' + encodeURIComponent(q),
+      { headers: { authorization: 'Bearer ' + accessToken } }
+    );
+    if (!listResp.ok) {
+      const errTxt = await listResp.text().catch(() => '');
+      return res.json({ messages: [], _debug: { error: 'gmail_list_http_' + listResp.status, body: errTxt.slice(0, 300) } });
+    }
+    const listData = await listResp.json();
+    const ids = (listData.messages || []).map(m => m.id);
+    if (!ids.length) {
+      return res.json({ messages: [], _debug: { q, total_matches: 0 } });
+    }
+    // Step 2: fetch metadata for each — parallel
+    const metaPromises = ids.map(async (id) => {
+      try {
+        const mResp = await fetch(
+          'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + id + '?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date',
+          { headers: { authorization: 'Bearer ' + accessToken } }
+        );
+        if (!mResp.ok) return null;
+        const m = await mResp.json();
+        const headers = (m.payload && m.payload.headers) || [];
+        const dateStr = _headerVal(headers, 'Date');
+        const ts = dateStr ? new Date(dateStr).getTime() : 0;
+        return {
+          id: m.id,
+          thread_id: m.threadId,
+          from: _headerVal(headers, 'From'),
+          to: _headerVal(headers, 'To'),
+          subject: _headerVal(headers, 'Subject'),
+          date_iso: ts ? new Date(ts).toISOString() : null,
+          date_raw: dateStr,
+          snippet: m.snippet || '',
+          labels: m.labelIds || [],
+          has_attachments: (m.payload && m.payload.parts || []).some(p => p.filename && p.filename.length > 0)
+        };
+      } catch (e) { return null; }
+    });
+    const metas = (await Promise.all(metaPromises)).filter(Boolean);
+    // Sort newest first
+    metas.sort((a, b) => (b.date_iso || '').localeCompare(a.date_iso || ''));
+    return res.json({ messages: metas, _debug: { q, count: metas.length } });
+  } catch (err) {
+    console.error('[/emails/search]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
+// GET /emails/:msgId — full body
+app.get('/emails/:msgId', requireAuth, async (req, res) => {
+  try {
+    const accessToken = await _ampleGoogleToken(req.user.id);
+    if (!accessToken) return res.status(401).json({ error: 'not_connected' });
+    const msgId = String(req.params.msgId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!msgId) return res.status(400).json({ error: 'bad_msg_id' });
+    const mResp = await fetch(
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + msgId + '?format=full',
+      { headers: { authorization: 'Bearer ' + accessToken } }
+    );
+    if (!mResp.ok) {
+      const errTxt = await mResp.text().catch(() => '');
+      return res.status(mResp.status).json({ error: 'gmail_http_' + mResp.status, message: errTxt.slice(0, 300) });
+    }
+    const m = await mResp.json();
+    const headers = (m.payload && m.payload.headers) || [];
+    const parts = { text: '', html: '', attachments: [] };
+    _extractParts(m.payload || {}, parts);
+    return res.json({
+      id: m.id,
+      thread_id: m.threadId,
+      from: _headerVal(headers, 'From'),
+      to: _headerVal(headers, 'To'),
+      cc: _headerVal(headers, 'Cc'),
+      subject: _headerVal(headers, 'Subject'),
+      date_raw: _headerVal(headers, 'Date'),
+      body_text: parts.text || '',
+      body_html: parts.html || '',
+      attachments: parts.attachments || [],
+      labels: m.labelIds || [],
+      snippet: m.snippet || ''
+    });
+  } catch (err) {
+    console.error('[/emails/:msgId]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
+// POST /emails/:msgId/extract — Claude extracts claim fields from email body
+app.post('/emails/:msgId/extract', requireAuth, async (req, res) => {
+  try {
+    const accessToken = await _ampleGoogleToken(req.user.id);
+    if (!accessToken) return res.status(401).json({ error: 'not_connected' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'no_api_key' });
+    const msgId = String(req.params.msgId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!msgId) return res.status(400).json({ error: 'bad_msg_id' });
+    // Fetch the email
+    const mResp = await fetch(
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + msgId + '?format=full',
+      { headers: { authorization: 'Bearer ' + accessToken } }
+    );
+    if (!mResp.ok) {
+      return res.status(500).json({ error: 'gmail_fetch_failed', status: mResp.status });
+    }
+    const m = await mResp.json();
+    const headers = (m.payload && m.payload.headers) || [];
+    const parts = { text: '', html: '', attachments: [] };
+    _extractParts(m.payload || {}, parts);
+    // Prefer plain text. If only HTML available, strip tags.
+    let body = parts.text;
+    if (!body && parts.html) body = parts.html.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!body) body = m.snippet || '';
+    // Truncate to keep the prompt bounded
+    if (body.length > 12000) body = body.slice(0, 12000) + '\n\n[...truncated]';
+    const subject = _headerVal(headers, 'Subject');
+    const from = _headerVal(headers, 'From');
+    const dateRaw = _headerVal(headers, 'Date');
+
+    const prompt =
+`You are extracting structured fields from a single email about an insurance claim. The email is below.
+
+Return ONLY a JSON object with these keys (use null when a field is not clearly present):
+
+{
+  "carrier": "insurance carrier name if mentioned",
+  "policyNumber": "policy number if mentioned",
+  "claimNumber": "claim number / file number from the carrier",
+  "adjusterName": "the carrier-side adjuster's name if introduced",
+  "adjusterEmail": "the adjuster's email if shown",
+  "adjusterPhone": "the adjuster's phone if shown",
+  "dateOfLoss": "date of loss as YYYY-MM-DD if mentioned",
+  "inspectionDate": "scheduled inspection date as YYYY-MM-DD if mentioned",
+  "settlementOffer": "settlement / offer amount as number only, no $ or commas",
+  "deductible": "deductible mentioned in the email, number only",
+  "deadlineDate": "any deadline / response-by date as YYYY-MM-DD",
+  "decision": "one of: acknowledged, approved, partial, denied, supplement_requested, info_requested, or null",
+  "summary": "one short sentence (max 20 words) describing what this email is about"
+}
+
+Rules:
+- Use null for any field that isn't clearly stated in the email.
+- Do not invent values. Do not output any keys other than the ones above.
+- Output ONLY the JSON object. No code fences, no commentary.
+
+Email metadata:
+Subject: ${subject}
+From: ${from}
+Date: ${dateRaw}
+
+Email body:
+---
+${body}
+---`;
+
+    const aResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    if (!aResp.ok) {
+      const errTxt = await aResp.text();
+      return res.status(500).json({ error: 'anthropic_error', message: errTxt.slice(0, 300) });
+    }
+    const aData = await aResp.json();
+    const text = (aData.content && aData.content[0] && aData.content[0].text) || '';
+    let cleaned = text.trim();
+    if (cleaned.startsWith('```')) {
+      cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    }
+    let fields = null;
+    try { fields = JSON.parse(cleaned); } catch (e) {
+      const mm = cleaned.match(/\{[\s\S]*\}/);
+      if (mm) { try { fields = JSON.parse(mm[0]); } catch (e2) {} }
+    }
+    if (!fields || typeof fields !== 'object') {
+      return res.status(500).json({ error: 'parse_failed', raw: cleaned.slice(0, 400) });
+    }
+    return res.json({ fields, subject, from, date_raw: dateRaw });
+  } catch (err) {
+    console.error('[/emails/:msgId/extract]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
+
 app.post('/events', requireAuth, async (req, res) => {
   try {
     const b = req.body || {};
