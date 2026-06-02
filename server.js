@@ -537,44 +537,77 @@ app.get('/events', requireAuth, async (req, res) => {
     let gcalRan = false;
     try {
       gcalRan = true;
-      const accessToken = await googleAccessToken(req.user.id);
-      if (accessToken) {
-        const gParams = new URLSearchParams({
-          timeMin: new Date(start).toISOString(),
-          timeMax: new Date(end).toISOString(),
-          singleEvents: 'true',
-          orderBy: 'startTime',
-          maxResults: '250'
-        });
-        const gResp = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events?' + gParams.toString(), {
-          headers: { authorization: 'Bearer ' + accessToken }
-        });
-        if (gResp.ok) {
-          const gData = await gResp.json();
-          gcalRows = ((gData && gData.items) || []).map(function(g) {
-            const gs = (g.start && (g.start.dateTime || g.start.date)) || null;
-            const ge = (g.end && (g.end.dateTime || g.end.date)) || null;
-            return {
-              id: 'gcal_' + (g.id || ''),
-              user_id: req.user.id,
-              claim_local_id: null,
-              title: g.summary || '(no title)',
-              notes: g.description || null,
-              location: g.location || null,
-              starts_at: gs,
-              ends_at: ge,
-              all_day: !!(g.start && g.start.date && !g.start.dateTime),
-              source: 'google',
-              google_event_id: g.id || null,
-              google_html_link: g.htmlLink || null,
-              status: g.status || null
-            };
-          });
-        } else {
-          gcalError = 'http ' + gResp.status + ': ' + (await gResp.text().catch(() => '')).slice(0, 200);
-        }
+      // Inline access-token lookup with refresh (googleAccessToken helper isn't in scope here)
+      const ur = await pool.query(
+        "SELECT google_access_token, google_refresh_token, google_token_expiry FROM users WHERE id = $1",
+        [req.user.id]
+      );
+      const urow = ur && ur.rows && ur.rows[0];
+      if (!urow || !urow.google_refresh_token) {
+        gcalError = 'not_connected';
       } else {
-        gcalError = 'no_access_token';
+        let accessToken = urow.google_access_token;
+        const expiry = Number(urow.google_token_expiry || 0);
+        const nowMs = Date.now();
+        if (!accessToken || expiry - 60000 <= nowMs) {
+          const rResp = await fetch('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              client_id: process.env.GOOGLE_CLIENT_ID || '',
+              client_secret: process.env.GOOGLE_CLIENT_SECRET || '',
+              refresh_token: urow.google_refresh_token,
+              grant_type: 'refresh_token'
+            }).toString()
+          });
+          if (!rResp.ok) {
+            gcalError = 'refresh_failed ' + rResp.status + ': ' + (await rResp.text().catch(() => '')).slice(0, 200);
+          } else {
+            const rData = await rResp.json();
+            accessToken = rData.access_token;
+            const newExpiry = nowMs + (Number(rData.expires_in || 3600) * 1000);
+            await pool.query(
+              'UPDATE users SET google_access_token = $1, google_token_expiry = $2 WHERE id = $3',
+              [accessToken, newExpiry, req.user.id]
+            );
+          }
+        }
+        if (accessToken && !gcalError) {
+          const gParams = new URLSearchParams({
+            timeMin: new Date(start).toISOString(),
+            timeMax: new Date(end).toISOString(),
+            singleEvents: 'true',
+            orderBy: 'startTime',
+            maxResults: '250'
+          });
+          const gResp = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events?' + gParams.toString(), {
+            headers: { authorization: 'Bearer ' + accessToken }
+          });
+          if (gResp.ok) {
+            const gData = await gResp.json();
+            gcalRows = ((gData && gData.items) || []).map(function(g) {
+              const gs = (g.start && (g.start.dateTime || g.start.date)) || null;
+              const ge = (g.end && (g.end.dateTime || g.end.date)) || null;
+              return {
+                id: 'gcal_' + (g.id || ''),
+                user_id: req.user.id,
+                claim_local_id: null,
+                title: g.summary || '(no title)',
+                notes: g.description || null,
+                location: g.location || null,
+                starts_at: gs,
+                ends_at: ge,
+                all_day: !!(g.start && g.start.date && !g.start.dateTime),
+                source: 'google',
+                google_event_id: g.id || null,
+                google_html_link: g.htmlLink || null,
+                status: g.status || null
+              };
+            });
+          } else {
+            gcalError = 'calendar_http_' + gResp.status + ': ' + (await gResp.text().catch(() => '')).slice(0, 200);
+          }
+        }
       }
     } catch (gErr) { gcalError = (gErr && (gErr.message || String(gErr))) || 'unknown'; }
     res.json({ events: [...gcalRows, ...rows], _debug: { gcal_count: gcalRows.length, gcal_error: gcalError, gcal_ran: gcalRan, gcal_user_id: req.user.id } });
