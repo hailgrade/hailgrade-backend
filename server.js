@@ -1105,6 +1105,110 @@ app.post('/supplements/analyze', requireAuth, requireActiveSubscription, async (
     return res.status(500).json({ error: err.message || 'Supplement analysis failed' });
   }
 });
+
+// ============================================================
+// POST /policy/extract â Dec page / policy auto-extract via Claude vision
+// Drop this entire block into server.js anywhere with the other app.post(...) routes.
+// Requires: ANTHROPIC_API_KEY env var (already set in Render for /analyze).
+// ============================================================
+
+app.post('/policy/extract', requireAuth, async (req, res) => {
+  try {
+    const { image_base64, media_type, pdf_base64, filename, claim_local_id } = req.body || {};
+    if (!image_base64 && !pdf_base64) {
+      return res.status(400).json({ error: 'missing_input', message: 'image_base64 or pdf_base64 required' });
+    }
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return res.status(500).json({ error: 'no_api_key' });
+    }
+
+    // Build the Claude message â image OR PDF (document) block, plus the extraction prompt
+    const content = [];
+    if (pdf_base64) {
+      content.push({
+        type: 'document',
+        source: { type: 'base64', media_type: 'application/pdf', data: pdf_base64 }
+      });
+    } else {
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: media_type || 'image/jpeg', data: image_base64 }
+      });
+    }
+
+    const prompt =
+`You are extracting structured fields from a homeowner insurance Declarations (Dec) page or policy document.
+
+Return ONLY a JSON object with these keys (use null when a field is not clearly visible):
+
+{
+  "insured": "primary named insured (full name)",
+  "address": "insured property address (one line)",
+  "phone": "insured's phone if shown",
+  "email": "insured's email if shown",
+  "carrier": "insurance company name (State Farm, Citizens, Allstate, Travelers, etc.)",
+  "policyNumber": "policy number exactly as printed",
+  "claimNumber": "claim number if shown (often null on Dec pages)",
+  "policyType": "one of: Residential, Commercial, Condo, Landlord, Auto, Other",
+  "policyStart": "policy effective date as YYYY-MM-DD",
+  "policyEnd": "policy expiration date as YYYY-MM-DD",
+  "coverageA": "Dwelling/Coverage A limit, number only no $ or commas",
+  "coverageB": "Other Structures/Coverage B limit, number only",
+  "coverageC": "Contents/Coverage C limit, number only",
+  "coverageD": "Loss of Use/Coverage D limit, number only",
+  "deductible": "AOP deductible as number only (prefer AOP over wind/hail if split)",
+  "dateOfLoss": "date of loss if shown, YYYY-MM-DD"
+}
+
+Rules:
+- If a value is ambiguous or not clearly visible, return null for that key.
+- Do not invent values. Do not include keys other than those above.
+- Coverages + deductible must be numeric strings, no symbols ("350000" not "$350,000").
+- Output ONLY the JSON object. No markdown, no commentary, no code fences.`;
+
+    content.push({ type: 'text', text: prompt });
+
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        messages: [{ role: 'user', content }]
+      })
+    });
+
+    if (!resp.ok) {
+      const errTxt = await resp.text();
+      return res.status(500).json({ error: 'anthropic_error', message: errTxt.slice(0, 300) });
+    }
+
+    const data = await resp.json();
+    const text = (data.content && data.content[0] && data.content[0].text) || '';
+    // Strip code fences if Claude wrapped its reply despite the instruction not to
+    let cleaned = text.trim();
+    if (cleaned.startsWith('```')) {
+      cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    }
+    let fields = null;
+    try { fields = JSON.parse(cleaned); } catch (e) {
+      const m = cleaned.match(/\{[\s\S]*\}/);
+      if (m) { try { fields = JSON.parse(m[0]); } catch (e2) {} }
+    }
+    if (!fields || typeof fields !== 'object') {
+      return res.status(500).json({ error: 'parse_failed', raw: cleaned.slice(0, 400) });
+    }
+    return res.json({ fields, claim_local_id: claim_local_id || null });
+  } catch (err) {
+    console.error('policy/extract error', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
 // ============ Stripe billing ============
 app.post('/billing/checkout', requireAuth, async (req, res) => {
   try {
