@@ -715,30 +715,52 @@ app.get('/emails/search', requireAuth, async (req, res) => {
     if (!accessToken) {
       return res.json({ messages: [], _debug: { error: 'not_connected' } });
     }
-    // Build the Gmail q string — broad match across name/address/claim#/policy#/carrier/email
-    const terms = [];
-    const add = (val) => {
-      const v = String(val || '').trim();
-      if (v) {
-        // Quote multi-word values so Gmail searches them as a phrase
-        if (/\s/.test(v)) terms.push('"' + v.replace(/"/g, '') + '"');
-        else terms.push(v);
-      }
+    // Build a TIGHT Gmail query. Only include genuinely identifying signals — a
+    // bare carrier name ("State Farm") or a common first name matches the entire
+    // inbox, which is what we want to avoid.
+    //
+    // Signals we trust on their own:
+    //   - Claim number  (carrier-issued, nearly unique)
+    //   - Policy number (issuer-specific, very unique)
+    //   - Insured email (from: OR to:)
+    //
+    // Signals we only use COMBINED:
+    //   - Customer name AND street address  (both must appear)
+    //
+    // Signals we never use alone:
+    //   - Carrier (matches every email from the carrier)
+    //   - Name only (matches every email about anyone with that name)
+    const phrase = (v) => {
+      const s = String(v || '').trim().replace(/"/g, '');
+      if (!s) return '';
+      return /\s/.test(s) ? ('"' + s + '"') : s;
     };
-    add(req.query.name);
-    add(req.query.address);
-    add(req.query.claim_number);
-    add(req.query.policy_number);
-    add(req.query.carrier);
+    const trustedTerms = [];
+    if (req.query.claim_number)  { const t = phrase(req.query.claim_number);  if (t) trustedTerms.push(t); }
+    if (req.query.policy_number) { const t = phrase(req.query.policy_number); if (t) trustedTerms.push(t); }
     if (req.query.insured_email) {
       const em = String(req.query.insured_email).trim();
-      if (em) terms.push('(from:' + em + ' OR to:' + em + ')');
+      if (em) trustedTerms.push('(from:' + em + ' OR to:' + em + ')');
     }
-    if (!terms.length) {
-      return res.json({ messages: [], _debug: { error: 'no_search_terms' } });
+    const nameStr = String(req.query.name || '').trim();
+    const addrFull = String(req.query.address || '').trim();
+    const addrStreet = addrFull.split(',')[0].trim();
+    if (nameStr && addrStreet) {
+      const np = phrase(nameStr);
+      const ap = phrase(addrStreet);
+      if (np && ap) trustedTerms.push('(' + np + ' AND ' + ap + ')');
     }
-    const days = parseInt(req.query.days || '60', 10) || 60;
-    const q = '(' + terms.join(' OR ') + ') newer_than:' + days + 'd';
+    if (!trustedTerms.length) {
+      return res.json({
+        messages: [],
+        _debug: {
+          error: 'no_specific_search_terms',
+          hint: 'Add a claim number, policy number, insured email, OR both customer name and street address to search Gmail for this claim.'
+        }
+      });
+    }
+    const days = parseInt(req.query.days || '90', 10) || 90;
+    const q = '(' + trustedTerms.join(' OR ') + ') newer_than:' + days + 'd';
     // Step 1: list matching message IDs (max 30)
     const listResp = await fetch(
       'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=30&q=' + encodeURIComponent(q),
