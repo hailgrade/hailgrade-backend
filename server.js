@@ -4224,6 +4224,66 @@ app.post("/partners/lead-with-files", requireAuth, async (req, res) => {
     client.release();
   }
 });
+
+// ============================================================
+// User cloud backup — automatic per-user snapshot of claim data
+// PUT /user/backup, GET /user/backup, GET /user/backup/meta
+// Frontend strips photos before pushing so payload stays small.
+// ============================================================
+let _userBackupTableEnsured = false;
+async function _ensureUserBackupTable() {
+  if (_userBackupTableEnsured) return;
+  await pool.query(
+    "CREATE TABLE IF NOT EXISTS user_backups (user_id INT PRIMARY KEY, payload JSONB NOT NULL, size_bytes INT, claim_count INT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+  );
+  _userBackupTableEnsured = true;
+}
+
+app.put("/user/backup", requireAuth, async (req, res) => {
+  try {
+    await _ensureUserBackupTable();
+    const payload = req.body && req.body.payload;
+    if (!payload || typeof payload !== "object") return res.status(400).json({ error: "missing_payload" });
+    const serialized = JSON.stringify(payload);
+    const sizeBytes = Buffer.byteLength(serialized, "utf8");
+    if (sizeBytes > 25 * 1024 * 1024) return res.status(413).json({ error: "too_large", size_bytes: sizeBytes });
+    const claimCount = Array.isArray(payload.claims) ? payload.claims.length : 0;
+    await pool.query(
+      "INSERT INTO user_backups (user_id, payload, size_bytes, claim_count, updated_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (user_id) DO UPDATE SET payload = EXCLUDED.payload, size_bytes = EXCLUDED.size_bytes, claim_count = EXCLUDED.claim_count, updated_at = NOW()",
+      [req.user.id, payload, sizeBytes, claimCount]
+    );
+    return res.json({ ok: true, size_bytes: sizeBytes, claim_count: claimCount, updated_at: new Date().toISOString() });
+  } catch (err) {
+    console.error("[/user/backup PUT]", err);
+    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
+  }
+});
+
+app.get("/user/backup", requireAuth, async (req, res) => {
+  try {
+    await _ensureUserBackupTable();
+    const r = await pool.query("SELECT payload, size_bytes, claim_count, updated_at FROM user_backups WHERE user_id = $1", [req.user.id]);
+    if (!r.rows.length) return res.json({ payload: null });
+    const row = r.rows[0];
+    return res.json({ payload: row.payload, size_bytes: row.size_bytes, claim_count: row.claim_count, updated_at: row.updated_at });
+  } catch (err) {
+    console.error("[/user/backup GET]", err);
+    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
+  }
+});
+
+app.get("/user/backup/meta", requireAuth, async (req, res) => {
+  try {
+    await _ensureUserBackupTable();
+    const r = await pool.query("SELECT size_bytes, claim_count, updated_at FROM user_backups WHERE user_id = $1", [req.user.id]);
+    if (!r.rows.length) return res.json({ updated_at: null, size_bytes: 0, claim_count: 0 });
+    return res.json(r.rows[0]);
+  } catch (err) {
+    console.error("[/user/backup/meta GET]", err);
+    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
+  }
+});
+
     app.listen(port, () => {
       console.log(`[boot] HailGrade API listening on :${port}`);
     });
