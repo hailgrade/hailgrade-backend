@@ -740,7 +740,18 @@ app.get('/emails/search', requireAuth, async (req, res) => {
     if (req.query.policy_number) { const t = phrase(req.query.policy_number); if (t) trustedTerms.push(t); }
     if (req.query.insured_email) {
       const em = String(req.query.insured_email).trim();
-      if (em) trustedTerms.push('(from:' + em + ' OR to:' + em + ')');
+      // SAFEGUARD: never search the user's OWN email as the insured email — it
+      // would match every message in their inbox. Drop it if it matches.
+      let userEmail = '';
+      try {
+        if (req.user && req.user.id) {
+          const ue = await pool.query('SELECT email FROM users WHERE id = $1', [req.user.id]);
+          userEmail = (ue && ue.rows && ue.rows[0] && ue.rows[0].email || '').trim().toLowerCase();
+        }
+      } catch (e) {}
+      if (em && em.toLowerCase() !== userEmail) {
+        trustedTerms.push('(from:' + em + ' OR to:' + em + ')');
+      }
     }
     const nameStr = String(req.query.name || '').trim();
     const addrFull = String(req.query.address || '').trim();
