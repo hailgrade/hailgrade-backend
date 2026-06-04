@@ -1585,13 +1585,23 @@ Return ONLY a JSON object with these keys (use null when a field is not clearly 
   "coverageC": "Contents/Coverage C limit, number only",
   "coverageD": "Loss of Use/Coverage D limit, number only",
   "deductible": "AOP deductible as number only (prefer AOP over wind/hail if split)",
-  "dateOfLoss": "date of loss if shown, YYYY-MM-DD"
+  "dateOfLoss": "date of loss if shown, YYYY-MM-DD",
+  "appraisal": {
+    "available": "true if an appraisal provision is present, false if explicitly excluded/removed, null if you cannot tell from this document",
+    "summary": "1-2 sentence plain-English explanation of how appraisal works under this policy. Mention who can invoke, time limits, umpire selection, and fee allocation if any of those are stated. null if available is null or false.",
+    "invokedBy": "who can demand appraisal: 'either party', 'insured only', 'insurer only', or null",
+    "timeLimit": "deadline to demand appraisal once a disagreement exists (e.g., '60 days after written demand', '20 days from notice of loss'), or null",
+    "umpireProcess": "how an umpire is chosen if the two appraisers disagree (e.g., 'court appoints if parties cannot agree within 15 days'), or null",
+    "feeAllocation": "who pays for what (e.g., 'each party pays own appraiser, umpire split equally'), or null",
+    "rawText": "the actual relevant excerpt from the policy verbatim, max 600 characters. null if not extractable."
+  }
 }
 
 Rules:
 - If a value is ambiguous or not clearly visible, return null for that key.
 - Do not invent values. Do not include keys other than those above.
 - Coverages + deductible must be numeric strings, no symbols ("350000" not "$350,000").
+- For "appraisal.available", return true ONLY if you can see explicit appraisal language. Many Dec pages don't include the appraisal clause text — in that case return null (not false). false is reserved for policies that explicitly say "this policy does NOT include an appraisal provision."
 - Output ONLY the JSON object. No markdown, no commentary, no code fences.`;
 
     content.push({ type: 'text', text: prompt });
@@ -1605,7 +1615,7 @@ Rules:
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 2048,
+        max_tokens: 3000,
         messages: [{ role: 'user', content }]
       })
     });
