@@ -4284,6 +4284,63 @@ app.get("/user/backup/meta", requireAuth, async (req, res) => {
   }
 });
 
+// ============================================================
+// PA → Roofer status sync
+// PA pushes their current pipeline stage for each claim that came from a roofer-lead.
+// Roofer polls back the latest stages for all leads they have sent.
+// ============================================================
+let _leadPaStatusesEnsured = false;
+async function _ensureLeadPaStatusesTable() {
+  if (_leadPaStatusesEnsured) return;
+  await pool.query(
+    "CREATE TABLE IF NOT EXISTS lead_pa_statuses (lead_id INT PRIMARY KEY, pa_user_id INT NOT NULL, stage TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+  );
+  _leadPaStatusesEnsured = true;
+}
+
+// POST /partners/lead-status — PA pushes the current pipeline stage for one of their claims
+// Body: { lead_id, stage }
+app.post("/partners/lead-status", requireAuth, async (req, res) => {
+  try {
+    await _ensureLeadPaStatusesTable();
+    const leadId = parseInt(req.body && req.body.lead_id, 10);
+    const stage = String((req.body && req.body.stage) || "").slice(0, 64);
+    if (!leadId || !stage) return res.status(400).json({ error: "bad_input" });
+    // Verify this PA is actually assigned to this lead (only the PA who owns the lead can push status)
+    const lr = await pool.query("SELECT id, assigned_to_user_id, source_user_id FROM leads WHERE id = $1", [leadId]);
+    const lead = lr && lr.rows && lr.rows[0];
+    if (!lead) return res.status(404).json({ error: "lead_not_found" });
+    if (lead.assigned_to_user_id !== req.user.id) return res.status(403).json({ error: "not_authorized" });
+    await pool.query(
+      "INSERT INTO lead_pa_statuses (lead_id, pa_user_id, stage, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (lead_id) DO UPDATE SET stage = EXCLUDED.stage, pa_user_id = EXCLUDED.pa_user_id, updated_at = NOW()",
+      [leadId, req.user.id, stage]
+    );
+    return res.json({ ok: true, lead_id: leadId, stage: stage });
+  } catch (err) {
+    console.error("[/partners/lead-status POST]", err);
+    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
+  }
+});
+
+// GET /partners/sent-statuses — roofer pulls the current PA stage for every lead they sent
+app.get("/partners/sent-statuses", requireAuth, async (req, res) => {
+  try {
+    await _ensureLeadPaStatusesTable();
+    const r = await pool.query(
+      "SELECT l.id AS lead_id, l.name AS lead_name, lps.stage, lps.updated_at, lps.pa_user_id " +
+      "FROM leads l LEFT JOIN lead_pa_statuses lps ON lps.lead_id = l.id " +
+      "WHERE l.source_user_id = $1 " +
+      "ORDER BY lps.updated_at DESC NULLS LAST, l.id DESC",
+      [req.user.id]
+    );
+    return res.json({ statuses: r.rows || [] });
+  } catch (err) {
+    console.error("[/partners/sent-statuses GET]", err);
+    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
+  }
+});
+
+
     app.listen(port, () => {
       console.log(`[boot] HailGrade API listening on :${port}`);
     });
