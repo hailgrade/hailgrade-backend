@@ -1743,7 +1743,7 @@ function _isoToYYMMDD(iso) {
 
 app.post('/weather/history', requireAuth, async (req, res) => {
   try {
-    let { address, lat, lng, days } = req.body || {};
+    let { address, lat, lng, days, around_date, buffer_days } = req.body || {};
     days = Math.min(Math.max(parseInt(days, 10) || 365, 7), 730);
 
     // 1. Geocode the address when no GPS coords were supplied
@@ -1775,8 +1775,18 @@ app.post('/weather/history', requireAuth, async (req, res) => {
     if (!wfo) return res.status(502).json({ error: 'no_office', detail: 'Could not determine the NWS forecast office for this location.' });
 
     // 3. Pull NWS Local Storm Reports for that office over the time window
-    const end = new Date();
-    const start = new Date(end.getTime() - days * 86400 * 1000);
+    // If client supplies around_date (YYYY-MM-DD), focus the search on that date.
+    // Otherwise fall back to "today minus days".
+    let start, end;
+    const _buf = Math.min(60, Math.max(1, parseInt(buffer_days, 10) || 14));
+    if (around_date && /^\d{4}-\d{2}-\d{2}/.test(String(around_date))) {
+      const center = new Date(String(around_date).slice(0,10) + 'T12:00:00Z');
+      end = new Date(center.getTime() + _buf * 86400 * 1000);
+      start = new Date(center.getTime() - _buf * 86400 * 1000);
+    } else {
+      end = new Date();
+      start = new Date(end.getTime() - days * 86400 * 1000);
+    }
     const sts = start.toISOString().slice(0, 16) + 'Z';
     const ets = end.toISOString().slice(0, 16) + 'Z';
     const lsrUrl = 'https://mesonet.agron.iastate.edu/cgi-bin/request/gis/lsr.py?sts=' + sts + '&ets=' + ets + '&wfo=' + wfo + '&fmt=csv';
