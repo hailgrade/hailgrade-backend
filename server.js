@@ -1571,6 +1571,7 @@ Return ONLY a JSON object with these keys (use null when a field is not clearly 
 
 {
   "insured": "primary named insured (full name)",
+  "coInsured": "second/additional named insured (co-insured) full name if present, else null",
   "address": "insured property address (one line)",
   "phone": "insured's phone if shown",
   "email": "insured's email if shown",
