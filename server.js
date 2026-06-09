@@ -1929,7 +1929,7 @@ app.post("/contracts/template", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Could not save contract" });
   }
 });
-
+app.delete("/contracts/template/:id", requireAuth, async (req, res) => { try { if (req.user && req.user.org_id && req.user.org_role === "member") return res.status(403).json({ error: "member_cannot_edit_templates" }); let ownerId = req.user.id; try { ownerId = await templateOwnerIdFor(req.user); } catch (e) {} const tid = parseInt(req.params.id, 10); if (!tid) return res.status(400).json({ error: "bad_id" }); await q("DELETE FROM user_contracts WHERE id = $1 AND user_id = $2", [tid, ownerId]); res.json({ ok: true }); } catch (e) { console.error("[contracts/template DELETE]", e); res.status(500).json({ error: "could_not_delete" }); } });
 app.get("/contracts/template", requireAuth, async (req, res) => {
   try { req.user.id = await templateOwnerIdFor(req.user); } catch (e) {}
   try {
