@@ -2105,23 +2105,24 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
           continue;
         }
 
-        // Text auto-fill fields — shrink the font so long values (e.g. a long carrier name) fit the box width.
+        // Text auto-fill fields. The detected box spans the FULL writable space available on the
+        // line, so the whole value fits. Draw a clean line across that space and the value on it,
+        // auto-sized down only if it still would not fit. (Keeps the user's exact page + fonts.)
         const val = valueFor(f);
         if (!val) continue;
-        let py, fs;
-        if (isNorm(f)) {
-          py = ps.h - ((+f.ny || 0) * ps.h) - boxH + Math.min(4, boxH * 0.25);
-          fs = Math.max(7, Math.min(13, Math.round(boxH * 0.62)));
-        } else {
-          py = +f.y || 0; fs = +f.fontSize || 11;
-        }
+        const boxBottom = isNorm(f) ? (ps.h - ((+f.ny || 0) * ps.h) - boxH) : (+f.y || 0);
+        let fs = isNorm(f) ? Math.max(8, Math.min(12, Math.round(boxH * 0.72))) : (+f.fontSize || 11);
         try {
           if (helvetica && boxW > 8) {
             let w = helvetica.widthOfTextAtSize(val, fs);
-            while (w > (boxW - 3) && fs > 5) { fs -= 0.5; w = helvetica.widthOfTextAtSize(val, fs); }
+            while (w > (boxW - 4) && fs > 6) { fs -= 0.5; w = helvetica.widthOfTextAtSize(val, fs); }
           }
         } catch (e) {}
-        try { pages[pageIdx].drawText(val, { x: boxX, y: py, size: fs, font: helvetica || undefined }); drewAny = true; } catch (e) {}
+        if (isNorm(f) && boxW > 10) {
+          try { pages[pageIdx].drawLine({ start: { x: boxX, y: boxBottom + 1 }, end: { x: boxX + boxW, y: boxBottom + 1 }, thickness: 0.5, color: rgb(0.55, 0.55, 0.55) }); } catch (e) {}
+        }
+        const valY = isNorm(f) ? (boxBottom + Math.max(3, (boxH - fs) * 0.4 + 2.5)) : (+f.y || 0);
+        try { pages[pageIdx].drawText(val, { x: boxX + 1, y: valY, size: fs, font: helvetica || undefined }); drewAny = true; } catch (e) {}
       }
       if (drewAny) outBuf = Buffer.from(await pdfDoc.save());
     } catch (e) {
@@ -2332,7 +2333,7 @@ app.post("/contracts/template/fieldmap", requireAuth, async (req, res) => {
   }
 });
 
-const DETECT_FIELDS_PROMPT = `You are looking at page images of a roofing contract. Find every BLANK FILL-IN FIELD that a person would write into: an empty underline, a blank space after a printed label, or an empty box. For each blank, give its position as a fraction of the page from 0 to 1, where x and y are the TOP-LEFT corner measured from the top-left of the page, and w and h are the width and height of the blank. Classify each blank as one of these types by reading the printed label next to it: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, signature, date_signed, check_nonemergency, check_emergency, check_supplemental, check_reopen, other. Use signature for where the customer signs their name. Use date_signed for the date blank right beside that customer signature. Use agreement_date for a contract date or agreement date near the top of the document. Use price for any contract price, total, amount, or dollar figure blank. ALSO look for a claim-type section with small empty checkbox squares (or blank parentheses/brackets) next to the printed words Non-Emergency, Emergency, Supplemental, and Reopen (sometimes labeled 'Type of Claim' or 'Type of Loss'); return one field for each such checkbox with the matching type check_nonemergency, check_emergency, check_supplemental, or check_reopen, positioned tightly on the little box itself (w and h roughly 0.02). Be precise with coordinates so the box sits directly on the blank. Return ONLY a JSON array and nothing else, in exactly this shape: [{"type":"client_name","page":1,"x":0.35,"y":0.21,"w":0.4,"h":0.03}]. The page value is 1-based. If you find no blanks, return [].`;
+const DETECT_FIELDS_PROMPT = `You are looking at page images of a roofing contract. Find every BLANK FILL-IN FIELD that a person would write into: an empty underline, a blank space after a printed label, or an empty box. For each blank, give its position as a fraction of the page from 0 to 1, where x and y are the TOP-LEFT corner measured from the top-left of the page, and w and h are the width and height of the WRITABLE SPACE for the answer. For w, capture the FULL horizontal room available to write the value: start where the blank begins (just after its printed label) and extend right until you reach the next printed text/label OR the right margin, whichever comes first — measure the entire empty writing area, NOT just a short visible underline. This makes long values (like a full insurance company name) fit. Classify each blank as one of these types by reading the printed label next to it: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, signature, date_signed, check_nonemergency, check_emergency, check_supplemental, check_reopen, other. Use signature for where the customer signs their name. Use date_signed for the date blank right beside that customer signature. Use agreement_date for a contract date or agreement date near the top of the document. Use price for any contract price, total, amount, or dollar figure blank. ALSO look for a claim-type section with small empty checkbox squares (or blank parentheses/brackets) next to the printed words Non-Emergency, Emergency, Supplemental, and Reopen (sometimes labeled 'Type of Claim' or 'Type of Loss'); return one field for each such checkbox with the matching type check_nonemergency, check_emergency, check_supplemental, or check_reopen, positioned tightly on the little box itself (w and h roughly 0.02). Be precise with coordinates so the box sits directly on the blank. Return ONLY a JSON array and nothing else, in exactly this shape: [{"type":"client_name","page":1,"x":0.35,"y":0.21,"w":0.4,"h":0.03}]. The page value is 1-based. If you find no blanks, return [].`;
 
 app.post("/contracts/detect-fields", requireAuth, async (req, res) => {
   if (req.user && req.user.org_id && req.user.org_role === 'member') return res.status(403).json({ error: 'member_cannot_edit_templates', message: 'Your team owner manages contract templates.' });
