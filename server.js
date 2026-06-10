@@ -2010,7 +2010,9 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     // instead of overlaying on the tight original — so the fill-in fields have real room.
     let docObj = null;
     try { const dj = tplRow.doc_json; if (dj) docObj = (typeof dj === "object") ? dj : JSON.parse(String(dj)); } catch (e) { docObj = null; }
-    const useRebuilt = !!(docObj && Array.isArray(docObj.sections) && docObj.sections.length);
+    // Reflow/rebuild disabled — always keep the user's EXACT uploaded PDF (same pages, same fonts)
+    // and overlay the fill-in text onto it, auto-shrunk to fit each blank.
+    const useRebuilt = false;
 
     const SIGN_TYPES = { signature: 1, date_signed: 1, initials: 1 };
     const typeOf = (f) => String((f && (f.type || f.id || f.name)) || "other").toLowerCase();
