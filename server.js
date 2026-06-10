@@ -1971,7 +1971,10 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     try { originalBuf = Buffer.from(b64, "base64"); }
     catch (e) { return res.status(500).json({ error: "Could not decode contract PDF" }); }
 
-    // Parse field_map (may be empty / null for fresh uploads)
+    // Parse field_map (may be empty / null for fresh uploads).
+    // New format entries are normalized to the page: { id, type, page (1-based),
+    // nx, ny, nw, nh } as fractions 0..1 from the TOP-LEFT, plus optional signer.
+    // Legacy entries used absolute pdf-lib points { x, y, fontSize }.
     let fieldMap = [];
     try {
       const raw = tplRow.field_map;
@@ -1979,74 +1982,144 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
       else if (typeof raw === "object") fieldMap = Array.isArray(raw) ? raw : (raw.fields || []);
       else { const p = JSON.parse(String(raw)); fieldMap = Array.isArray(p) ? p : (p.fields || []); }
     } catch (e) { fieldMap = []; }
-    const hasOverlay = fieldMap.some(f => f && fieldValues[f.id || f.name] && ((f.type || "text").toLowerCase() === "text" || (f.type || "").toLowerCase() === "string"));
 
-    // Read page dimensions for field positioning. If no overlay is needed, skip pdf-lib serialization entirely (preserves original PDF byte-for-byte).
+    const SIGN_TYPES = { signature: 1, date_signed: 1, initials: 1 };
+    const typeOf = (f) => String((f && (f.type || f.id || f.name)) || "other").toLowerCase();
+    const isNorm = (f) => f && f.nx != null && f.ny != null;
+
+    // Auto-fill values pulled from the claim — "fill in what it can".
+    const _today = new Date().toLocaleDateString("en-US");
+    const autoVals = {
+      client_name: signerName,
+      name: signerName,
+      property_address: body.property_address || "",
+      address: body.property_address || "",
+      phone: body.phone || body.signer_phone || "",
+      email: signerEmail,
+      carrier: body.carrier || "",
+      claim_number: body.claim_number || "",
+      price: body.price || "",
+      agreement_date: _today,
+      date: _today,
+      date_of_loss: body.date_of_loss || ""
+    };
+    const valueFor = (f) => {
+      const t = typeOf(f);
+      const id = f.id || f.name || t;
+      if (fieldValues[id] != null && fieldValues[id] !== "") return String(fieldValues[id]);
+      if (autoVals[t] != null && autoVals[t] !== "") return String(autoVals[t]);
+      return "";
+    };
+
+    // Load the PDF once: needed for per-page sizes and for any text overlay.
     let pageCount = 1, pageW = 612, pageH = 792;
+    const pageSizes = [];
     let outBuf = originalBuf;
-    if (hasOverlay) {
-      try {
-        const pdfDoc = await PDFDocument.load(originalBuf);
-        const pages = pdfDoc.getPages();
-        pageCount = pages.length;
-        if (pages[0]) { const sz = pages[0].getSize(); pageW = sz.width; pageH = sz.height; }
-        let helvetica = null;
-        try { helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica); } catch (e) {}
-        for (const f of fieldMap) {
-          if (!f || typeof f !== "object") continue;
-          const fid = f.id || f.name || "";
-          const val = fieldValues[fid];
-          if (val == null || val === "") continue;
-          const ftype = (f.type || "text").toLowerCase();
-          if (ftype !== "text" && ftype !== "string") continue;
-          const pageIdx = Math.max(0, Math.min(pageCount - 1, (f.page || 1) - 1));
-          const px = +f.x || 0;
-          const py = +f.y || 0;
-          const fs = +f.fontSize || 11;
-          try { pages[pageIdx].drawText(String(val), { x: px, y: py, size: fs, font: helvetica || undefined }); } catch (e) {}
+    try {
+      const pdfDoc = await PDFDocument.load(originalBuf);
+      const pages = pdfDoc.getPages();
+      pageCount = pages.length;
+      for (let i = 0; i < pages.length; i++) { const s = pages[i].getSize(); pageSizes.push({ w: s.width, h: s.height }); }
+      if (pageSizes[0]) { pageW = pageSizes[0].w; pageH = pageSizes[0].h; }
+      let helvetica = null;
+      try { helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica); } catch (e) {}
+      let drewAny = false;
+      for (const f of fieldMap) {
+        if (!f || typeof f !== "object") continue;
+        if (SIGN_TYPES[typeOf(f)]) continue;          // signature/initials/date are signer fields, not text
+        const val = valueFor(f);
+        if (!val) continue;
+        const pageIdx = Math.max(0, Math.min(pageCount - 1, (f.page || 1) - 1));
+        const ps = pageSizes[pageIdx] || { w: pageW, h: pageH };
+        let px, py, fs;
+        if (isNorm(f)) {
+          px = (+f.nx || 0) * ps.w;
+          const boxH = (+f.nh || 0.025) * ps.h;
+          py = ps.h - ((+f.ny || 0) * ps.h) - boxH + Math.min(4, boxH * 0.25);
+          fs = Math.max(8, Math.min(14, Math.round(boxH * 0.62)));
+        } else {
+          px = +f.x || 0; py = +f.y || 0; fs = +f.fontSize || 11;
         }
-        outBuf = Buffer.from(await pdfDoc.save());
-      } catch (e) {
-        console.error("[contracts/send] overlay failed, falling back to original", e);
-        outBuf = originalBuf;
+        try { pages[pageIdx].drawText(val, { x: px, y: py, size: fs, font: helvetica || undefined }); drewAny = true; } catch (e) {}
       }
-    } else {
-      // No overlay needed — but we still need page dims for field positioning. Read with pdf-lib but don't re-save.
-      try {
-        const pdfDoc = await PDFDocument.load(originalBuf);
-        const pages = pdfDoc.getPages();
-        pageCount = pages.length;
-        if (pages[0]) { const sz = pages[0].getSize(); pageW = sz.width; pageH = sz.height; }
-      } catch (e) { /* fall back to defaults */ }
+      if (drewAny) outBuf = Buffer.from(await pdfDoc.save());
+    } catch (e) {
+      console.error("[contracts/send] overlay failed, falling back to original", e);
+      outBuf = originalBuf;
     }
 
     // Build the signer list
     const signers = [{ name: signerName, email: signerEmail, order: 0 }];
     let sp = 1;
-    if (useClient2 && signer2Email) { signers.push({ name: signer2Name || "Second Signer", email: signer2Email, order: sp }); sp++; }
-    if (needsAdjuster) { signers.push({ name: req.user.full_name || req.user.firm_name || "Public Adjuster", email: req.user.email, order: sp }); sp++; }
+    let client2Idx = -1, adjusterIdx = -1;
+    if (useClient2 && signer2Email) { client2Idx = sp; signers.push({ name: signer2Name || "Second Signer", email: signer2Email, order: sp }); sp++; }
+    if (needsAdjuster) { adjusterIdx = sp; signers.push({ name: req.user.full_name || req.user.firm_name || "Public Adjuster", email: req.user.email, order: sp }); sp++; }
 
-    // Build form_fields_per_document — initials per page + signature + date on last page
+    // Map a field_map "signer" tag -> DS signer index
+    const signerIdxOf = (f) => {
+      const s = String((f && f.signer) || "client").toLowerCase();
+      if (s === "client2" && client2Idx >= 0) return client2Idx;
+      if (s === "adjuster" && adjusterIdx >= 0) return adjusterIdx;
+      if (s === "1" && client2Idx >= 0) return client2Idx;
+      return 0;
+    };
+
+    // Build form_fields_per_document. Coordinates are TOP-LEFT points (Dropbox Sign).
     const fields = [];
     let apiSeq = 0;
     const nextId = () => "field_" + (++apiSeq);
     const INIT_W = 70, INIT_H = 22;
     const SIG_W = 200, SIG_H = 40;
     const DATE_W = 110, DATE_H = 24;
-    for (let p = 1; p <= pageCount; p++) {
-      fields.push({ api_id: nextId(), type: "initials", page: p, x: pageW - INIT_W - 18, y: 18, width: INIT_W, height: INIT_H, required: true, signer: 0 });
-    }
     const lastPage = pageCount;
-    fields.push({ api_id: nextId(), type: "signature", page: lastPage, x: 50, y: 120, width: SIG_W, height: SIG_H, required: true, signer: 0 });
-    fields.push({ api_id: nextId(), type: "date_signed", page: lastPage, x: 50 + SIG_W + 20, y: 120, width: DATE_W, height: DATE_H, required: true, signer: 0 });
+    const dsBox = (f) => {
+      const pageIdx = Math.max(0, Math.min(pageCount - 1, (f.page || 1) - 1));
+      const ps = pageSizes[pageIdx] || { w: pageW, h: pageH };
+      return { x: Math.round((+f.nx || 0) * ps.w), y: Math.round((+f.ny || 0) * ps.h), width: Math.max(24, Math.round((+f.nw || 0.12) * ps.w)), height: Math.max(14, Math.round((+f.nh || 0.03) * ps.h)) };
+    };
+
+    // Mapped signer fields, by type
+    const mappedInitialsByPage = {};
+    const mappedSig = { client: null, client2: null };
+    const mappedDate = { client: null, client2: null };
+    for (const f of fieldMap) {
+      if (!f || !isNorm(f)) continue;
+      const t = typeOf(f);
+      if (t === "initials") { const p = f.page || 1; if (!mappedInitialsByPage[p]) mappedInitialsByPage[p] = f; }
+      else if (t === "signature") { const who = (String(f.signer || "client").toLowerCase() === "client2") ? "client2" : "client"; if (!mappedSig[who]) mappedSig[who] = f; }
+      else if (t === "date_signed") { const who = (String(f.signer || "client").toLowerCase() === "client2") ? "client2" : "client"; if (!mappedDate[who]) mappedDate[who] = f; }
+    }
+
+    // Initials at the bottom of EVERY page (mapped position if provided, else default bottom-right).
+    for (let p = 1; p <= pageCount; p++) {
+      const ps = pageSizes[p - 1] || { w: pageW, h: pageH };
+      const mf = mappedInitialsByPage[p];
+      const box = mf ? dsBox(mf) : { x: Math.round(ps.w - INIT_W - 18), y: Math.round(ps.h - INIT_H - 18), width: INIT_W, height: INIT_H };
+      fields.push({ api_id: nextId(), type: "initials", page: p, x: box.x, y: box.y, width: box.width, height: box.height, required: true, signer: mf ? signerIdxOf(mf) : 0 });
+    }
+    // Client signature + date (mapped, else default near the bottom of the last page).
+    {
+      const ps = pageSizes[lastPage - 1] || { w: pageW, h: pageH };
+      const sBox = mappedSig.client ? dsBox(mappedSig.client) : { x: 50, y: Math.round(ps.h - 90), width: SIG_W, height: SIG_H, page: lastPage };
+      const sPage = mappedSig.client ? (mappedSig.client.page || lastPage) : lastPage;
+      fields.push({ api_id: nextId(), type: "signature", page: sPage, x: sBox.x, y: sBox.y, width: sBox.width, height: sBox.height, required: true, signer: 0 });
+      const dBox = mappedDate.client ? dsBox(mappedDate.client) : { x: 50 + SIG_W + 20, y: Math.round(ps.h - 90), width: DATE_W, height: DATE_H };
+      const dPage = mappedDate.client ? (mappedDate.client.page || lastPage) : lastPage;
+      fields.push({ api_id: nextId(), type: "date_signed", page: dPage, x: dBox.x, y: dBox.y, width: dBox.width, height: dBox.height, required: true, signer: 0 });
+    }
     if (useClient2 && signer2Email) {
-      fields.push({ api_id: nextId(), type: "signature", page: lastPage, x: 50, y: 70, width: SIG_W, height: SIG_H, required: true, signer: 1 });
-      fields.push({ api_id: nextId(), type: "date_signed", page: lastPage, x: 50 + SIG_W + 20, y: 70, width: DATE_W, height: DATE_H, required: true, signer: 1 });
+      const ps = pageSizes[lastPage - 1] || { w: pageW, h: pageH };
+      const sBox = mappedSig.client2 ? dsBox(mappedSig.client2) : { x: 50, y: Math.round(ps.h - 150), width: SIG_W, height: SIG_H };
+      const sPage = mappedSig.client2 ? (mappedSig.client2.page || lastPage) : lastPage;
+      fields.push({ api_id: nextId(), type: "signature", page: sPage, x: sBox.x, y: sBox.y, width: sBox.width, height: sBox.height, required: true, signer: client2Idx });
+      const dBox = mappedDate.client2 ? dsBox(mappedDate.client2) : { x: 50 + SIG_W + 20, y: Math.round(ps.h - 150), width: DATE_W, height: DATE_H };
+      const dPage = mappedDate.client2 ? (mappedDate.client2.page || lastPage) : lastPage;
+      fields.push({ api_id: nextId(), type: "date_signed", page: dPage, x: dBox.x, y: dBox.y, width: dBox.width, height: dBox.height, required: true, signer: client2Idx });
     }
     if (needsAdjuster) {
-      const adjSignerIdx = signers.length - 1;
-      fields.push({ api_id: nextId(), type: "signature", page: lastPage, x: pageW - SIG_W - 50, y: 120, width: SIG_W, height: SIG_H, required: true, signer: adjSignerIdx });
-      fields.push({ api_id: nextId(), type: "date_signed", page: lastPage, x: pageW - SIG_W - 50, y: 90, width: DATE_W, height: DATE_H, required: true, signer: adjSignerIdx });
+      const ps = pageSizes[lastPage - 1] || { w: pageW, h: pageH };
+      fields.push({ api_id: nextId(), type: "signature", page: lastPage, x: Math.round(ps.w - SIG_W - 50), y: Math.round(ps.h - 90), width: SIG_W, height: SIG_H, required: true, signer: adjusterIdx });
+      fields.push({ api_id: nextId(), type: "date_signed", page: lastPage, x: Math.round(ps.w - SIG_W - 50), y: Math.round(ps.h - 60), width: DATE_W, height: DATE_H, required: true, signer: adjusterIdx });
     }
 
     // Use the template's actual name for the document title (not the hardcoded "Roofing Agreement").
@@ -2147,7 +2220,8 @@ app.post("/contracts/template/fieldmap", requireAuth, async (req, res) => {
     await ensureContractsSchema();
     const fm = (req.body && req.body.field_map) || [];
     if (!Array.isArray(fm)) return res.status(400).json({ error: "field_map must be an array" });
-    await q("UPDATE user_contracts SET field_map=$1 WHERE user_id=$2", [JSON.stringify(fm), req.user.id]);
+    const cid = (req.body && req.body.contract_id) ? parseInt(req.body.contract_id, 10) : null;
+    await q("UPDATE user_contracts SET field_map=$1 WHERE user_id=$2 AND id = COALESCE($3::int, (SELECT MAX(id) FROM user_contracts WHERE user_id=$2))", [JSON.stringify(fm), req.user.id, cid]);
     res.json({ ok: true, count: fm.length });
   } catch (e) {
     console.error("[contracts/fieldmap:save]", e);
@@ -2250,7 +2324,7 @@ app.get("/contracts/templates", requireAuth, async (req, res) => {
   try { req.user.id = await templateOwnerIdFor(req.user); } catch (e) {}
   try {
     await ensureContractsSchema();
-    const rows = dsRowsOf(await q("SELECT id, name, filename, uploaded_at, (doc_json IS NOT NULL) AS has_doc FROM user_contracts WHERE user_id=$1 ORDER BY id DESC", [req.user.id]));
+    const rows = dsRowsOf(await q("SELECT id, name, filename, uploaded_at, (doc_json IS NOT NULL) AS has_doc, (field_map IS NOT NULL AND field_map <> '' AND field_map <> '[]') AS has_fields FROM user_contracts WHERE user_id=$1 ORDER BY id DESC", [req.user.id]));
     res.json({ contracts: rows });
   } catch (e) {
     console.error("[contracts/templates]", e);
