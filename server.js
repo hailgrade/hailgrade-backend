@@ -2044,26 +2044,49 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
       pageCount = pages.length;
       for (let i = 0; i < pages.length; i++) { const s = pages[i].getSize(); pageSizes.push({ w: s.width, h: s.height }); }
       if (pageSizes[0]) { pageW = pageSizes[0].w; pageH = pageSizes[0].h; }
-      let helvetica = null;
+      let helvetica = null, helvBold = null;
       try { helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica); } catch (e) {}
+      try { helvBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold); } catch (e) {}
+      // The claim type the PA picked at send (Non-emergency / Emergency / Supplemental / Reopen).
+      const claimType = String(body.claim_type || "").toLowerCase().replace(/[^a-z]/g, "");
       let drewAny = false;
       for (const f of fieldMap) {
         if (!f || typeof f !== "object") continue;
-        if (SIGN_TYPES[typeOf(f)]) continue;          // signature/initials/date are signer fields, not text
-        const val = valueFor(f);
-        if (!val) continue;
+        const t = typeOf(f);
+        if (SIGN_TYPES[t]) continue;          // signature/initials/date are signer fields handled by Dropbox Sign
         const pageIdx = Math.max(0, Math.min(pageCount - 1, (f.page || 1) - 1));
         const ps = pageSizes[pageIdx] || { w: pageW, h: pageH };
-        let px, py, fs;
-        if (isNorm(f)) {
-          px = (+f.nx || 0) * ps.w;
-          const boxH = (+f.nh || 0.025) * ps.h;
-          py = ps.h - ((+f.ny || 0) * ps.h) - boxH + Math.min(4, boxH * 0.25);
-          fs = Math.max(8, Math.min(14, Math.round(boxH * 0.62)));
-        } else {
-          px = +f.x || 0; py = +f.y || 0; fs = +f.fontSize || 11;
+        const boxW = isNorm(f) ? (+f.nw || 0.1) * ps.w : 120;
+        const boxH = isNorm(f) ? (+f.nh || 0.025) * ps.h : 14;
+        const boxX = isNorm(f) ? (+f.nx || 0) * ps.w : (+f.x || 0);
+
+        // Claim-type checkboxes: draw an X only in the box matching the chosen claim type.
+        if (t.indexOf("check_") === 0) {
+          if (!claimType || t !== ("check_" + claimType)) continue;
+          const cs = Math.max(9, Math.min(16, Math.round(boxH * 0.95)));
+          const cx = boxX + Math.max(0, (boxW - cs * 0.6) / 2);
+          const cy = ps.h - (isNorm(f) ? (+f.ny || 0) * ps.h : 0) - boxH + Math.max(1, (boxH - cs) / 2);
+          try { pages[pageIdx].drawText("X", { x: cx, y: cy, size: cs, font: helvBold || helvetica || undefined }); drewAny = true; } catch (e) {}
+          continue;
         }
-        try { pages[pageIdx].drawText(val, { x: px, y: py, size: fs, font: helvetica || undefined }); drewAny = true; } catch (e) {}
+
+        // Text auto-fill fields — shrink the font so long values (e.g. a long carrier name) fit the box width.
+        const val = valueFor(f);
+        if (!val) continue;
+        let py, fs;
+        if (isNorm(f)) {
+          py = ps.h - ((+f.ny || 0) * ps.h) - boxH + Math.min(4, boxH * 0.25);
+          fs = Math.max(7, Math.min(13, Math.round(boxH * 0.62)));
+        } else {
+          py = +f.y || 0; fs = +f.fontSize || 11;
+        }
+        try {
+          if (helvetica && boxW > 8) {
+            let w = helvetica.widthOfTextAtSize(val, fs);
+            while (w > (boxW - 3) && fs > 5) { fs -= 0.5; w = helvetica.widthOfTextAtSize(val, fs); }
+          }
+        } catch (e) {}
+        try { pages[pageIdx].drawText(val, { x: boxX, y: py, size: fs, font: helvetica || undefined }); drewAny = true; } catch (e) {}
       }
       if (drewAny) outBuf = Buffer.from(await pdfDoc.save());
     } catch (e) {
@@ -2266,7 +2289,7 @@ app.post("/contracts/template/fieldmap", requireAuth, async (req, res) => {
   }
 });
 
-const DETECT_FIELDS_PROMPT = `You are looking at page images of a roofing contract. Find every BLANK FILL-IN FIELD that a person would write into: an empty underline, a blank space after a printed label, or an empty box. For each blank, give its position as a fraction of the page from 0 to 1, where x and y are the TOP-LEFT corner measured from the top-left of the page, and w and h are the width and height of the blank. Classify each blank as one of these types by reading the printed label next to it: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, signature, date_signed, other. Use signature for where the customer signs their name. Use date_signed for the date blank right beside that customer signature. Use agreement_date for a contract date or agreement date near the top of the document. Use price for any contract price, total, amount, or dollar figure blank. Be precise with coordinates so the box sits directly on the blank. Return ONLY a JSON array and nothing else, in exactly this shape: [{"type":"client_name","page":1,"x":0.35,"y":0.21,"w":0.4,"h":0.03}]. The page value is 1-based. If you find no blanks, return [].`;
+const DETECT_FIELDS_PROMPT = `You are looking at page images of a roofing contract. Find every BLANK FILL-IN FIELD that a person would write into: an empty underline, a blank space after a printed label, or an empty box. For each blank, give its position as a fraction of the page from 0 to 1, where x and y are the TOP-LEFT corner measured from the top-left of the page, and w and h are the width and height of the blank. Classify each blank as one of these types by reading the printed label next to it: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, signature, date_signed, check_nonemergency, check_emergency, check_supplemental, check_reopen, other. Use signature for where the customer signs their name. Use date_signed for the date blank right beside that customer signature. Use agreement_date for a contract date or agreement date near the top of the document. Use price for any contract price, total, amount, or dollar figure blank. ALSO look for a claim-type section with small empty checkbox squares (or blank parentheses/brackets) next to the printed words Non-Emergency, Emergency, Supplemental, and Reopen (sometimes labeled 'Type of Claim' or 'Type of Loss'); return one field for each such checkbox with the matching type check_nonemergency, check_emergency, check_supplemental, or check_reopen, positioned tightly on the little box itself (w and h roughly 0.02). Be precise with coordinates so the box sits directly on the blank. Return ONLY a JSON array and nothing else, in exactly this shape: [{"type":"client_name","page":1,"x":0.35,"y":0.21,"w":0.4,"h":0.03}]. The page value is 1-based. If you find no blanks, return [].`;
 
 app.post("/contracts/detect-fields", requireAuth, async (req, res) => {
   if (req.user && req.user.org_id && req.user.org_role === 'member') return res.status(403).json({ error: 'member_cannot_edit_templates', message: 'Your team owner manages contract templates.' });
