@@ -1984,7 +1984,7 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     if (!signerName || !signerEmail) return res.status(400).json({ error: "Client name and email are required" });
 
     // Load the template — use the ORIGINAL pdf_base64 (no AI rebuild = no font/spacing drift)
-    const tpl = dsRowsOf(await q("SELECT id, name, filename, pdf_base64, field_map FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts S WHERE S.user_id=$1)) ORDER BY id DESC LIMIT 1", [req.user.id, templateId]));
+    const tpl = dsRowsOf(await q("SELECT id, name, filename, pdf_base64, field_map, doc_json FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts S WHERE S.user_id=$1)) ORDER BY id DESC LIMIT 1", [req.user.id, templateId]));
     if (!tpl.length) return res.status(400).json({ error: "Upload your contract first" });
     const tplRow = tpl[0];
     const originalPdfB64 = tplRow.pdf_base64;
@@ -2005,6 +2005,12 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
       else if (typeof raw === "object") fieldMap = Array.isArray(raw) ? raw : (raw.fields || []);
       else { const p = JSON.parse(String(raw)); fieldMap = Array.isArray(p) ? p : (p.fields || []); }
     } catch (e) { fieldMap = []; }
+
+    // If this template was reflowed (rebuilt into a clean, evenly-spaced doc), send THAT
+    // instead of overlaying on the tight original — so the fill-in fields have real room.
+    let docObj = null;
+    try { const dj = tplRow.doc_json; if (dj) docObj = (typeof dj === "object") ? dj : JSON.parse(String(dj)); } catch (e) { docObj = null; }
+    const useRebuilt = !!(docObj && Array.isArray(docObj.sections) && docObj.sections.length);
 
     const SIGN_TYPES = { signature: 1, date_signed: 1, initials: 1 };
     const typeOf = (f) => String((f && (f.type || f.id || f.name)) || "other").toLowerCase();
@@ -2038,7 +2044,34 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     let pageCount = 1, pageW = 612, pageH = 792;
     const pageSizes = [];
     let outBuf = originalBuf;
-    try {
+    let useTextTags = false;
+
+    if (useRebuilt) {
+      try {
+        let _sp = 1;
+        const _c2i = (useClient2 && signer2Email) ? _sp++ : -1;
+        const _adji = needsAdjuster ? _sp++ : -1;
+        const signerMap = { client: "signer1" };
+        if (_c2i >= 0) signerMap.client2 = "signer" + (_c2i + 1);
+        if (_adji >= 0) signerMap.adjuster = "signer" + (_adji + 1);
+        const renderBody = {
+          signer_name: signerName, claim_name: claimName,
+          property_address: body.property_address || "", phone: body.phone || body.signer_phone || "",
+          signer_phone: body.signer_phone || body.phone || "", signer_email: signerEmail,
+          carrier: body.carrier || "", claim_number: body.claim_number || "",
+          price: body.price || "", scope: body.scope || "",
+          claim_type: String(body.claim_type || "").toLowerCase().replace(/[^a-z]/g, ""),
+          field_values: (body.field_values && typeof body.field_values === "object") ? body.field_values : null
+        };
+        outBuf = Buffer.from(await renderContractPdf(docObj, { mode: "filled", body: renderBody, signer_map: signerMap }));
+        useTextTags = true;
+      } catch (e) {
+        console.error("[contracts/send] reflow render failed, falling back to original overlay", e);
+        useTextTags = false;
+      }
+    }
+
+    if (!useTextTags) try {
       const pdfDoc = await PDFDocument.load(originalBuf);
       const pages = pdfDoc.getPages();
       pageCount = pages.length;
@@ -2111,7 +2144,9 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     };
 
     // Build form_fields_per_document. Coordinates are TOP-LEFT points (Dropbox Sign).
-    const fields = [];
+    // Skipped for reflowed contracts — those use in-document text tags instead.
+    let fields = [];
+    if (!useTextTags) {
     let apiSeq = 0;
     const nextId = () => "field_" + (++apiSeq);
     const INIT_W = 70, INIT_H = 22;
@@ -2167,6 +2202,7 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
       fields.push({ api_id: nextId(), type: "signature", page: lastPage, x: Math.round(ps.w - SIG_W - 50), y: Math.round(ps.h - 90), width: SIG_W, height: SIG_H, required: true, signer: adjusterIdx });
       fields.push({ api_id: nextId(), type: "date_signed", page: lastPage, x: Math.round(ps.w - SIG_W - 50), y: Math.round(ps.h - 60), width: DATE_W, height: DATE_H, required: true, signer: adjusterIdx });
     }
+    } // end if (!useTextTags) form_fields builder
 
     // Use the template's actual name for the document title (not the hardcoded "Roofing Agreement").
     const tplName = (tplRow.name || (tplRow.filename || "").replace(/\.pdf$/i, "") || "Agreement").trim();
@@ -2184,7 +2220,12 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     if (!needsAdjuster) form.append("cc_email_addresses[0]", req.user.email);
     form.append("test_mode", "1");
     form.append("file[0]", new Blob([outBuf], { type: "application/pdf" }), tplRow.filename || "agreement.pdf");
-    form.append("form_fields_per_document", JSON.stringify([fields]));
+    if (useTextTags) {
+      form.append("use_text_tags", "1");
+      form.append("hide_text_tags", "1");
+    } else {
+      form.append("form_fields_per_document", JSON.stringify([fields]));
+    }
 
     const dsRes = await fetch("https://api.hellosign.com/v3/signature_request/send", { method: "POST", headers: { "Authorization": dsAuthHeader() }, body: form });
     const dsJson = await dsRes.json();
@@ -2327,7 +2368,7 @@ app.post("/contracts/detect-fields", requireAuth, async (req, res) => {
   }
 });
 
-const REBUILD_PROMPT = `You are given a roofing, home improvement, or public adjuster contract document. Transcribe the ENTIRE contract exactly, word for word. Do not summarize, reword, shorten, paraphrase, or omit anything. Every clause, sentence, term, number, percentage, dollar amount, license number, warranty, and notice must be reproduced exactly as written. Identify the structure of the document and estimate the font size of each part so the original sizing is preserved exactly. Return ONLY a JSON object and nothing else, in this exact shape: {"title":"the contract title","title_size":16,"sections":[ ]}. title_size is the point size of the title. Each item in sections must be one of these four forms: {"kind":"heading","text":"a heading exactly as written","size":12} or {"kind":"paragraph","text":"a clause or paragraph transcribed word for word","size":10} or {"kind":"field","label":"the printed label of a fill-in blank","field_id":"an id from the list","multiline":false,"size":10,"signer":"client, client2, or adjuster"} or {"kind":"signature","label":"the party who signs here","signer":"client, client2, or adjuster"}. The size value is your best estimate of the printed font size in points. Typical contract body text is 9 to 12 points. Most body paragraphs share one consistent size, so use the same size for them; only report a different size when the original clearly prints that text larger or smaller. Pay very close attention to any text printed larger or smaller than the body, such as a required legal notice, disclosure, or cancellation notice, and estimate its size accurately, because that exact size must be preserved for legal compliance. For every blank line, underline, or labeled fill-in space, emit a field section. Choose field_id from this list: client_name, property_address, phone, email, carrier, claim_number, price, percentage, scope, agreement_date, date_signed, initials, other. Use percentage for any blank that holds a percent value, such as next to a percent sign, an adjuster fee, a contractor fee, a retainer share, or a percent of net proceeds. Use initials for any spot where the client puts their initials rather than a full signature, such as initialing a page or initialing next to a specific clause. Set multiline to true only for large write-in areas such as the scope or description of work. Represent each signing area as a single signature section. For every signature, initials, and date_signed spot, also set a signer property: use "client" for the primary customer, insured, homeowner, or property owner; use "client2" for a second, different insured or co-owner who has their own separate signature line, such as a co-insured or a spouse or a second property owner; use "adjuster" for the public adjuster, adjuster, contractor, roofer, company, or firm representative. When the document has two separate signature lines on the customer side, use "client" for the first and "client2" for the second. When you cannot tell, use "client". Keep every section in the original reading order and transcribe the document completely from start to finish.`;
+const REBUILD_PROMPT = `You are given a roofing, home improvement, or public adjuster contract document. Transcribe the ENTIRE contract exactly, word for word. Do not summarize, reword, shorten, paraphrase, or omit anything. Every clause, sentence, term, number, percentage, dollar amount, license number, warranty, and notice must be reproduced exactly as written. Identify the structure of the document and estimate the font size of each part so the original sizing is preserved exactly. Return ONLY a JSON object and nothing else, in this exact shape: {"title":"the contract title","title_size":16,"sections":[ ]}. title_size is the point size of the title. Each item in sections must be one of these four forms: {"kind":"heading","text":"a heading exactly as written","size":12} or {"kind":"paragraph","text":"a clause or paragraph transcribed word for word","size":10} or {"kind":"field","label":"the printed label of a fill-in blank","field_id":"an id from the list","multiline":false,"size":10,"signer":"client, client2, or adjuster"} or {"kind":"signature","label":"the party who signs here","signer":"client, client2, or adjuster"}. The size value is your best estimate of the printed font size in points. Typical contract body text is 9 to 12 points. Most body paragraphs share one consistent size, so use the same size for them; only report a different size when the original clearly prints that text larger or smaller. Pay very close attention to any text printed larger or smaller than the body, such as a required legal notice, disclosure, or cancellation notice, and estimate its size accurately, because that exact size must be preserved for legal compliance. For every blank line, underline, or labeled fill-in space, emit a field section. Choose field_id from this list: client_name, property_address, phone, email, carrier, claim_number, price, percentage, scope, agreement_date, date_signed, initials, claim_type, other. If the contract has a section asking what kind of claim this is — with options such as Non-Emergency, Emergency, Supplemental, and Reopen (often shown as checkboxes, sometimes titled 'Type of Claim' or 'Type of Loss') — emit it as ONE single field with field_id 'claim_type' and label 'Type of Claim', and do NOT also transcribe those option words as a paragraph (the renderer draws the checkboxes itself). Use percentage for any blank that holds a percent value, such as next to a percent sign, an adjuster fee, a contractor fee, a retainer share, or a percent of net proceeds. Use initials for any spot where the client puts their initials rather than a full signature, such as initialing a page or initialing next to a specific clause. Set multiline to true only for large write-in areas such as the scope or description of work. Represent each signing area as a single signature section. For every signature, initials, and date_signed spot, also set a signer property: use "client" for the primary customer, insured, homeowner, or property owner; use "client2" for a second, different insured or co-owner who has their own separate signature line, such as a co-insured or a spouse or a second property owner; use "adjuster" for the public adjuster, adjuster, contractor, roofer, company, or firm representative. When the document has two separate signature lines on the customer side, use "client" for the first and "client2" for the second. When you cannot tell, use "client". Keep every section in the original reading order and transcribe the document completely from start to finish.`;
 
 app.post("/contracts/rebuild", requireAuth, async (req, res) => {
   try {
@@ -2650,6 +2691,26 @@ async function renderContractPdf(doc, opts) {
       var fno = fieldIdx; fieldIdx++;
       var ov = (mode === "filled" && fieldValues && fieldValues[fno] != null && String(fieldValues[fno]).trim() !== "") ? String(fieldValues[fno]) : "";
       var val = (mode === "filled") ? (ov || valueFor(fid)) : "";
+      if (fid === "claim_type") {
+        // Claim-type checkbox row — X the option the PA picked at send time.
+        var _ct = String(body.claim_type || "").toLowerCase().replace(/[^a-z]/g, "");
+        var _opts = [["nonemergency", "Non-Emergency"], ["emergency", "Emergency"], ["supplemental", "Supplemental"], ["reopen", "Reopen"]];
+        need(fs * 3.2);
+        page.drawText(wa(label || "Type of Claim") + ":", { x: M, y: y - fs, size: fs, font: bold, color: ink });
+        y -= fs * 1.7;
+        var _cx = M, _bs = fs * 0.95;
+        for (var _oi = 0; _oi < _opts.length; _oi++) {
+          var _lbl = " " + _opts[_oi][1];
+          var _lw = font.widthOfTextAtSize(_lbl, fs);
+          if (_cx + _bs + _lw + 16 > W - M) { _cx = M; y -= fs * 1.9; need(fs * 1.9); }
+          page.drawRectangle({ x: _cx, y: y - _bs, width: _bs, height: _bs, borderWidth: 0.9, borderColor: ink, color: white });
+          if (mode === "filled" && _ct === _opts[_oi][0]) { page.drawText("X", { x: _cx + _bs * 0.17, y: y - _bs + _bs * 0.15, size: _bs, font: bold, color: ink }); }
+          page.drawText(wa(_lbl), { x: _cx + _bs + 2, y: y - fs, size: fs, font: font, color: ink });
+          _cx += _bs + _lw + 18;
+        }
+        y -= fs * 2.0;
+        continue;
+      }
       if (sec.multiline) {
         need(fs * 6);
         page.drawText(label + ":", { x: M, y: y - fs, size: fs, font: bold, color: ink });
