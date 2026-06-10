@@ -861,6 +861,28 @@ app.get('/emails/:msgId', requireAuth, async (req, res) => {
   }
 });
 
+// GET /emails/:msgId/attachment/:attId — download one Gmail attachment's bytes (base64)
+app.get('/emails/:msgId/attachment/:attId', requireAuth, async (req, res) => {
+  try {
+    const accessToken = await _ampleGoogleToken(req.user.id);
+    if (!accessToken) return res.status(401).json({ error: 'not_connected' });
+    const msgId = String(req.params.msgId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    const attId = String(req.params.attId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!msgId || !attId) return res.status(400).json({ error: 'bad_id' });
+    const aResp = await fetch(
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + msgId + '/attachments/' + attId,
+      { headers: { authorization: 'Bearer ' + accessToken } }
+    );
+    if (!aResp.ok) { const t = await aResp.text().catch(() => ''); return res.status(aResp.status).json({ error: 'gmail_http_' + aResp.status, message: t.slice(0, 200) }); }
+    const a = await aResp.json();
+    const b64 = String(a.data || '').replace(/-/g, '+').replace(/_/g, '/');
+    return res.json({ data_base64: b64, size: a.size || 0 });
+  } catch (err) {
+    console.error('[/emails/attachment]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
 // POST /emails/:msgId/extract — Claude extracts claim fields from email body
 app.post('/emails/:msgId/extract', requireAuth, async (req, res) => {
   try {
@@ -1902,6 +1924,7 @@ async function ensureContractsSchema() {
   await q("CREATE TABLE IF NOT EXISTS user_contracts (user_id INTEGER PRIMARY KEY, filename TEXT, pdf_base64 TEXT, uploaded_at TIMESTAMPTZ DEFAULT now())");
   await q("CREATE TABLE IF NOT EXISTS contracts (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, claim_local_id TEXT, claim_name TEXT, signer_name TEXT, signer_email TEXT, signature_request_id TEXT, status TEXT DEFAULT 'sent', signed_pdf_url TEXT, created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now())");
   try { await q("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS price TEXT"); } catch (e) {}
+  try { await q("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS sent_pdf_base64 TEXT"); } catch (e) {}
   try { await q("ALTER TABLE user_contracts ADD COLUMN IF NOT EXISTS field_map TEXT"); } catch (e) {}
   try { await q("ALTER TABLE user_contracts ADD COLUMN IF NOT EXISTS doc_json TEXT"); } catch (e) {}
   try { await q("ALTER TABLE user_contracts DROP CONSTRAINT IF EXISTS user_contracts_pkey"); } catch (e) {}
@@ -2148,11 +2171,25 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
       return res.status(502).json({ error: msg });
     }
     const srId = dsJson.signature_request && dsJson.signature_request.signature_request_id;
-    const ins = dsRowsOf(await q("INSERT INTO contracts (user_id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status, price) VALUES ($1,$2,$3,$4,$5,$6,'sent',$7) RETURNING id", [req.user.id, claimLocalId, claimName, signerName, signerEmail, srId, body.price || null]));
+    let _sentB64 = null; try { _sentB64 = Buffer.from(outBuf).toString("base64"); } catch (e) {}
+    const ins = dsRowsOf(await q("INSERT INTO contracts (user_id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status, price, sent_pdf_base64) VALUES ($1,$2,$3,$4,$5,$6,'sent',$7,$8) RETURNING id", [req.user.id, claimLocalId, claimName, signerName, signerEmail, srId, body.price || null, _sentB64]));
     res.json({ ok: true, id: ins[0] ? ins[0].id : null, signature_request_id: srId, status: "sent" });
   } catch (e) {
     console.error("[contracts/send]", e);
     res.status(500).json({ error: "Could not send contract" });
+  }
+});
+// GET /contracts/sent-doc/:id — the exact PDF that was sent for signature (preview/print while awaiting).
+app.get("/contracts/sent-doc/:id", requireAuth, async (req, res) => {
+  try {
+    await ensureContractsSchema();
+    const rows = dsRowsOf(await q("SELECT signer_name, sent_pdf_base64 FROM contracts WHERE id=$1 AND user_id=$2", [parseInt(req.params.id, 10), req.user.id]));
+    if (!rows.length || !rows[0].sent_pdf_base64) return res.status(404).json({ error: "No sent document on file for this contract" });
+    const safe = String(rows[0].signer_name || "contract").replace(/[^a-zA-Z0-9]+/g, "-");
+    res.json({ filename: "Sent-" + safe + ".pdf", pdf_base64: rows[0].sent_pdf_base64 });
+  } catch (e) {
+    console.error("[contracts/sent-doc]", e);
+    res.status(500).json({ error: "Could not load the document" });
   }
 });
 app.get("/contracts/list", requireAuth, async (req, res) => {
@@ -2985,9 +3022,10 @@ app.post("/contracts/send-lor", requireAuth, async (req, res) => {
     }
     const sr = dsJson.signature_request || {};
     const srId = sr.signature_request_id || "";
+    let _lorB64 = null; try { _lorB64 = Buffer.from(pdfBytes).toString("base64"); } catch (e) {}
     const ins = dsRowsOf(await q(
-      "INSERT INTO contracts (user_id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status, price) VALUES ($1,$2,$3,$4,$5,$6,'sent',$7) RETURNING id",
-      [req.user.id, body.claim_local_id || null, claimName || null, signerName, signerEmail, srId, body.price || null]
+      "INSERT INTO contracts (user_id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status, price, sent_pdf_base64) VALUES ($1,$2,$3,$4,$5,$6,'sent',$7,$8) RETURNING id",
+      [req.user.id, body.claim_local_id || null, claimName || null, signerName, signerEmail, srId, body.price || null, _lorB64]
     ));
     res.json({ ok: true, id: ins[0] ? ins[0].id : null, signature_request_id: srId, status: "sent" });
   } catch (e) {
