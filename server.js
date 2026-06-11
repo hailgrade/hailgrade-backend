@@ -3335,6 +3335,166 @@ app.get("/contracts/lor-preview", requireAuth, async (req, res) => {
 });
 /* ================= END LOR FROM SCRATCH ================= */
 
+/* ===================== LETTERS & FORMS ===================== */
+function _ltrFmtDate(v, mode){
+  if(v==null||v==='') return '';
+  let d=(v instanceof Date)?v:new Date(v);
+  if(isNaN(d)) return String(v);
+  const M=["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const day=d.getDate(), mon=d.getMonth(), yr=d.getFullYear();
+  switch((mode||'').trim()){
+    case 'long': return M[mon]+' '+day+', '+yr;
+    case 'short': return (mon+1)+'/'+day+'/'+yr;
+    case 'nth': { const s=['th','st','nd','rd'], v2=day%100; return day+(s[(v2-20)%10]||s[v2]||s[0]); }
+    case 'MMMM': return M[mon];
+    case 'yy': return String(yr).slice(-2);
+    default: return M[mon]+' '+day+', '+yr;
+  }
+}
+function _ltrParseToken(tokenFull){
+  let i=tokenFull.indexOf(']');
+  let field=(i>=0)?tokenFull.slice(0,i):tokenFull;
+  let rest=(i>=0)?tokenFull.slice(i+1):'';
+  const mods=[]; let p=0;
+  while(p<rest.length){
+    if(rest[p]===':'){ let ns=++p; while(p<rest.length&&/\w/.test(rest[p]))p++; let name=rest.slice(ns,p); let arg='';
+      if(rest[p]==='('){ let depth=1; p++; let s=p; while(p<rest.length&&depth>0){ if(rest[p]==='(')depth++; else if(rest[p]===')')depth--; if(depth>0)p++; } arg=rest.slice(s,p); p++; }
+      mods.push({name,arg}); } else p++;
+  }
+  return {field,mods};
+}
+function _ltrResolve(text, data){
+  if(text==null) return '';
+  let out='', i=0;
+  while(i<text.length){
+    if(text[i]==='['&&text[i+1]==='['){
+      let j=i+2, dp=0, bodyEnd=-1;
+      while(j<text.length){ if(text[j]==='(')dp++; else if(text[j]===')')dp--; else if(text[j]===']'&&dp<=0){ bodyEnd=j; break; } j++; }
+      let k=(bodyEnd>=0?bodyEnd:i+2)+1, d2=0;
+      while(k<text.length){
+        if(text[k]===':'){ k++; while(k<text.length&&/\w/.test(text[k]))k++; if(text[k]==='('){ d2=1; k++; while(k<text.length&&d2>0){ if(text[k]==='(')d2++; else if(text[k]===')')d2--; k++; } } }
+        else if(text[k]===']'){ k++; break; } else break;
+      }
+      const tokenFull=text.slice(i+2, k-1);
+      const {field,mods}=_ltrParseToken(tokenFull);
+      let val=data[field]; val=(val==null)?'':String(val);
+      let isBlank=false, blankN=0;
+      mods.forEach(m=>{ if(m.name==='format'){ const r=_ltrFmtDate(data[field], m.arg); if(r!=='') val=r; } else if(m.name==='blank'){ isBlank=true; blankN=parseInt(m.arg,10)||10; } });
+      if(val===''&&isBlank) val='_'.repeat(Math.max(6,Math.min(40,blankN)));
+      out+=val; i=k;
+    } else { out+=text[i]; i++; }
+  }
+  return out;
+}
+const LETTER_TEMPLATES=[
+  { id:'90day', name:'90-Day Notice to Insurance Company', category:'Letters', esign:false, blocks:[
+    {p:'[[today]:format(long)]',tight:true},{gap:8},
+    {p:'RE:  Policy #[[insurance.policynumber]],  Claim #[[insurance.claimnumber]]',bold:true,tight:true},{gap:10},
+    {p:'Dear Claims:',tight:true},
+    {p:'This email is intended to place [[insurance.company]:blank(20)] on notice that the time period with which to adjust the loss with Smith Adjusters on behalf of [[policyholders.name]:delimit(, ( & ))] has expired as set forth in the policy of insurance and Florida Statute §627.70131.'},
+    {p:'Please provide a coverage determination by close of business tomorrow or, in the alternative, explain the factors that currently exist that place the insurance company within factors beyond their control that are reasonably preventing a coverage determination.  Please note, it is not appropriate to respond to this correspondence with new, previous unrequested, compliance with policy conditions.'},
+    {p:'Thank you,',tight:true},{gap:18},
+    {p:'Alexander James Smith',tight:true},{p:'Public Adjuster - License #W844243',tight:true},{p:'Smith Adjusters',tight:true},{p:'407-927-0134',tight:true}
+  ]},
+  { id:'lon', name:'Letter of Notification (LON) to Insurer', category:'Letters', esign:false, blocks:[
+    {p:'[[today]:format(long)]',tight:true},{gap:10},
+    {p:'Attn: Claims Department',tight:true},{p:'[[insurance.company]]',tight:true},
+    {p:'[[insurance.company.address.line1]:blank(30)]',tight:true},{p:'[[insurance.company.address.line2]:blank(30)]',tight:true},{gap:8},
+    {kv:['Re:  Insured:','[[policyholders.name]:delimit(, ( & ))]']},{kv:['Claim #:','[[insurance.claimnumber]]']},
+    {kv:['Policy #:','[[insurance.policynumber]]']},{kv:['Date of Loss:','[[loss.date]:format(short)]']},
+    {kv:['Cause of loss:','[[loss.peril]]']},{kv:['Adjuster Assigned:','[[personnel.adjuster.name]]']},
+    {kv:['Loss Address:','[[loss.address]]']},{gap:10},
+    {p:'Please be advised that Smith Adjusters has been retained by the above-referenced Named Insured for the subject loss. Enclosed you will find a copy of our Letter of Representation. If this claim has not already been notified by the Insured, kindly notify the claim at this time. Smith Adjusters requests that all further communication and correspondence regarding this claim be directed to this office.'},
+    {p:'Please provide a certified copy of the subject policy of insurance so that we are prepared to adjust the loss with you and to discuss the applicable coverage with the Named Insured. An electronic copy of the certified policy is accepted and can be provided by email to claims@smithadjusters.com.'},
+    {p:'The name "Smith Adjusters" must be included on all drafts, checks, and correspondence pertaining to this loss, and mailed directly to:'},
+    {p:'Smith Adjusters, 498 Palm Springs Dr., Suite 100, Altamonte Springs, FL 32701',tight:true},{gap:6},
+    {p:'Kindly contact our assigned adjuster, Alex Smith as soon as possible to discuss this loss or set an appointment to inspect this property. Thank you in advance for your cooperation.'},
+    {p:'Sincerely,',tight:true},{gap:14},
+    {p:'/s/ Alex Smith',tight:true},{p:'Alexander J. Smith',tight:true},{p:'License #: W844243',tight:true},{p:'Smith Adjusters',tight:true}
+  ]},
+  { id:'mortgage', name:'Mortgage Authorization (Client to PA)', category:'Forms', esign:true, blocks:[
+    {h1:'MORTGAGE AUTHORIZATION FORM'},{gap:6},
+    {kv:['Lender Name:','[[mortgage.company]:blank(30)]']},{kv:['Address:','[[mortgage.company.address]:blank(30)]']},
+    {kv:['Attention:','Loss Draft and/or Insurance Claim Department']},{kv:['Re:','[[policyholders.name]:delimit(, ( & ))]']},
+    {kv:['Mortgage Address:','[[loss.address]]']},{kv:['Date of Loss:','[[loss.date]:format(short)]']},{kv:['Loan No.:','[[mortgage.loannumber]:blank(20)]']},{gap:10},
+    {p:'I/We [[policyholders.name]:delimit(, ( & ))], hereby give my/our consent to allow Alex Smith, with Smith Adjusters to speak on my/our behalf regarding the above loan and the disbursement of insurance benefits related to the above referenced insurance claim.'},
+    {p:'Thank you for your prompt attention to this matter. If any questions arise, please contact the undersigned.'},
+    {p:'Sincerely,',tight:true},{gap:24},{sig:['Client Name']},{gap:10},{sig:['Client Name']}
+  ]}
+];
+async function renderLetterPdf(tpl, data){
+  const pdf=await PDFDocument.create();
+  const helv=await pdf.embedFont(StandardFonts.Helvetica);
+  const bold=await pdf.embedFont(StandardFonts.HelveticaBold);
+  const W=612,H=792,M=64,RIGHT=W-64,maxW=W-128;
+  const GREEN=rgb(0.49,0.78,0.27),DARK=rgb(0.18,0.21,0.25),BLACK=rgb(0.1,0.1,0.1),GREY=rgb(0.4,0.4,0.4);
+  const sigFields=[]; let pageIdx=0;
+  let page=pdf.addPage([W,H]); let y=H-56;
+  function header(){ const t1='SMITH ',t2='ADJUSTERS',s=17; const w1=bold.widthOfTextAtSize(t1,s),w2=bold.widthOfTextAtSize(t2,s),cx=(W-(w1+w2))/2;
+    page.drawText(t1,{x:cx,y:y,size:s,font:bold,color:DARK}); page.drawText(t2,{x:cx+w1,y:y,size:s,font:bold,color:GREEN}); y-=16;
+    const addr='498 Palm Springs Dr., Suite 100  •  Altamonte Springs, FL 32701  •  407-927-0134  •  claims@smithadjusters.com';
+    const aw=helv.widthOfTextAtSize(addr,8); page.drawText(addr,{x:(W-aw)/2,y:y,size:8,font:helv,color:GREY}); y-=10;
+    page.drawLine({start:{x:M,y:y},end:{x:RIGHT,y:y},thickness:1,color:GREEN}); y-=22; }
+  function need(h){ if(y-h<70){ page=pdf.addPage([W,H]); pageIdx++; y=H-64; } }
+  function wrap(text,font,size,width){ const words=String(text).split(/(\s+)/); const lines=[]; let cur=''; for(const w of words){ const test=cur+w; if(font.widthOfTextAtSize(test,size)>width&&cur.trim()){ lines.push(cur); cur=w.replace(/^\s+/,''); } else cur=test; } if(cur.trim()) lines.push(cur); return lines; }
+  header();
+  for(const b of tpl.blocks){
+    if(b.gap){ y-=b.gap; continue; }
+    if(b.h1){ const t=_ltrResolve(b.h1,data); need(24); const w=bold.widthOfTextAtSize(t,14); page.drawText(t,{x:(W-w)/2,y:y,size:14,font:bold,color:BLACK}); y-=24; continue; }
+    if(b.kv){ const val=_ltrResolve(b.kv[1],data); need(16); page.drawText(b.kv[0],{x:M,y:y,size:10.5,font:bold,color:BLACK}); page.drawText(val,{x:M+130,y:y,size:10.5,font:helv,color:BLACK}); y-=16; continue; }
+    if(b.sig){ need(40); y-=6; page.drawText('Signature: ',{x:M,y:y,size:11,font:helv,color:BLACK}); page.drawLine({start:{x:M+58,y:y-1},end:{x:M+270,y:y-1},thickness:0.7,color:BLACK});
+      page.drawText('Date: ',{x:M+300,y:y,size:11,font:helv,color:BLACK}); page.drawLine({start:{x:M+335,y:y-1},end:{x:RIGHT,y:y-1},thickness:0.7,color:BLACK});
+      sigFields.push({type:'signature',page:pageIdx+1,x:M+60,y:H-(y-1)-16,width:206,height:18});
+      sigFields.push({type:'date_signed',page:pageIdx+1,x:M+337,y:H-(y-1)-16,width:RIGHT-(M+337),height:18});
+      y-=13; page.drawText(b.sig[0]||'Client Name',{x:M,y:y,size:8.5,font:helv,color:GREY}); page.drawText('Date',{x:M+300,y:y,size:8.5,font:helv,color:GREY}); y-=22; continue; }
+    if(b.right){ const t=_ltrResolve(b.right,data); need(15); const w=helv.widthOfTextAtSize(t,11); page.drawText(t,{x:RIGHT-w,y:y,size:11,font:helv,color:BLACK}); y-=15; continue; }
+    if(b.p!=null){ const t=_ltrResolve(b.p,data); const size=b.size||11; const font=b.bold?bold:helv; const lines=wrap(t,font,size,maxW); for(const ln of lines){ need(size+4); page.drawText(ln,{x:M,y:y,size:size,font:font,color:BLACK}); y-=(size+4); } y-=(b.tight?2:8); continue; }
+  }
+  return { bytes: await pdf.save(), sigFields };
+}
+function _ltrFindTemplate(id){ return LETTER_TEMPLATES.find(t=>t.id===id); }
+app.get("/letters/templates", requireAuth, async (req, res) => {
+  res.json({ templates: LETTER_TEMPLATES.map(t=>({ id:t.id, name:t.name, category:t.category, esign:!!t.esign })) });
+});
+app.post("/letters/render", requireAuth, async (req, res) => {
+  try {
+    const body=req.body||{}; const tpl=_ltrFindTemplate(body.template_id);
+    if(!tpl) return res.status(404).json({ error:"Unknown template" });
+    const data=Object.assign({}, body.fields||{}); if(!data['today']) data['today']=new Date().toISOString();
+    const { bytes }=await renderLetterPdf(tpl, data);
+    res.json({ ok:true, filename:(tpl.name||'Letter')+'.pdf', pdf_base64:Buffer.from(bytes).toString('base64') });
+  } catch(e){ console.error("[letters/render]",e); res.status(500).json({ error:"Could not build the letter" }); }
+});
+app.post("/letters/send-esign", requireAuth, async (req, res) => {
+  try {
+    if(!DS_API_KEY) return res.status(500).json({ error:"E-signature is not configured" });
+    const body=req.body||{}; const tpl=_ltrFindTemplate(body.template_id);
+    if(!tpl) return res.status(404).json({ error:"Unknown template" });
+    const signerName=String(body.signer_name||'').trim(), signerEmail=String(body.signer_email||'').trim();
+    if(!signerName||!signerEmail) return res.status(400).json({ error:"Client name and email are required" });
+    const data=Object.assign({}, body.fields||{}); if(!data['today']) data['today']=new Date().toISOString();
+    const { bytes, sigFields }=await renderLetterPdf(tpl, data);
+    const fields=sigFields.map((f,i)=>({ api_id:'f'+i, type:f.type, page:f.page, x:Math.round(f.x), y:Math.round(f.y), width:Math.round(f.width), height:Math.round(f.height), required:true, signer:0 }));
+    const form=new FormData();
+    form.append("title",(tpl.name||'Form')+(body.claim_name?(' - '+body.claim_name):''));
+    form.append("subject","Please sign: "+(tpl.name||'Form'));
+    form.append("message","Please review and sign this form. A signed copy will be emailed to all parties once complete.");
+    form.append("signers[0][name]",signerName); form.append("signers[0][email_address]",signerEmail); form.append("signers[0][order]","0");
+    form.append("cc_email_addresses[0]",req.user.email); form.append("test_mode","1");
+    if(fields.length) form.append("form_fields_per_document",JSON.stringify([fields]));
+    form.append("file[0]", new Blob([bytes],{type:"application/pdf"}), (tpl.id||'form')+".pdf");
+    const dsRes=await fetch(DS_BASE+"/signature_request/send",{ method:"POST", headers:{ "Authorization":dsAuthHeader() }, body:form });
+    const dsJson=await dsRes.json().catch(()=>({}));
+    if(!dsRes.ok){ console.error("[letters/send-esign] provider",dsRes.status,JSON.stringify(dsJson)); return res.status(502).json({ error:(dsJson&&dsJson.error&&dsJson.error.error_msg)||"E-signature provider rejected the request" }); }
+    const sr=dsJson.signature_request||{}; const srId=sr.signature_request_id||"";
+    let _b64=null; try{ _b64=Buffer.from(bytes).toString("base64"); }catch(e){}
+    try { await q("INSERT INTO contracts (user_id, claim_local_id, claim_name, signer_name, signer_email, signature_request_id, status, sent_pdf_base64) VALUES ($1,$2,$3,$4,$5,$6,'sent',$7)",[req.user.id, body.claim_local_id||null, body.claim_name||tpl.name, signerName, signerEmail, srId, _b64]); } catch(e){}
+    res.json({ ok:true, signature_request_id:srId, status:"sent" });
+  } catch(e){ console.error("[letters/send-esign]",e); res.status(500).json({ error:"Could not send the form" }); }
+});
+/* =================== END LETTERS & FORMS =================== */
+
+
 
 /* ===================== ROOF MEASUREMENT (Google Solar API) ===================== */
 async function geocodeUS(address) {
@@ -4315,462 +4475,4 @@ app.post('/partners/code', requireAuth, async (req, res) => {
     let code = null;
     for (let attempt = 0; attempt < 5; attempt++) {
       const candidate = _generatePartnerCode();
-      const dup = await pool.query('SELECT 1 FROM partner_invite_codes WHERE code = $1', [candidate]);
-      if (!dup.rowCount) { code = candidate; break; }
-    }
-    if (!code) return res.status(500).json({ error: 'could_not_generate_code' });
-    await pool.query('INSERT INTO partner_invite_codes (code, issuer_user_id, issuer_role) VALUES ($1, $2, $3)', [code, req.user.id, myRole]);
-    res.json({ code, issuer_role: myRole, reused: false });
-  } catch (err) {
-    console.error('[partners:code]', err);
-    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
-  }
-});
-
-app.post('/partners/redeem', requireAuth, async (req, res) => {
-  try {
-    const code = String((req.body && req.body.code) || '').trim().toUpperCase();
-    if (!code || code.length !== 6) return res.status(400).json({ error: 'code_required' });
-    const cr = await pool.query('SELECT * FROM partner_invite_codes WHERE code = $1', [code]);
-    if (!cr.rowCount) return res.status(404).json({ error: 'code_not_found' });
-    const codeRow = cr.rows[0];
-    if (codeRow.redeemed_by_user_id) return res.status(409).json({ error: 'code_already_redeemed' });
-    if (codeRow.issuer_user_id === req.user.id) return res.status(400).json({ error: 'cant_redeem_own_code' });
-    const myRole = _userRole(req.user);
-    const issuerRole = String(codeRow.issuer_role || '').toLowerCase();
-    if (myRole === issuerRole) return res.status(400).json({ error: 'role_mismatch', message: 'This code is from another ' + issuerRole + '. You need a code from a ' + (myRole === 'roofer' ? 'PA' : 'roofer') + '.' });
-    const paId = (myRole === 'pa') ? req.user.id : codeRow.issuer_user_id;
-    const rooferId = (myRole === 'roofer') ? req.user.id : codeRow.issuer_user_id;
-    await pool.query('INSERT INTO partner_links (pa_user_id, roofer_user_id) VALUES ($1, $2) ON CONFLICT (pa_user_id, roofer_user_id) DO NOTHING', [paId, rooferId]);
-    await pool.query('UPDATE partner_invite_codes SET redeemed_by_user_id = $1, redeemed_at = now() WHERE id = $2', [req.user.id, codeRow.id]);
-    const partnerId = (myRole === 'pa') ? rooferId : paId;
-    const pu = await pool.query('SELECT id, email, full_name, firm_name, role FROM users WHERE id = $1', [partnerId]);
-    res.json({ ok: true, partner: pu.rows[0] || null });
-  } catch (err) {
-    console.error('[partners:redeem]', err);
-    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
-  }
-});
-
-app.get('/partners', requireAuth, async (req, res) => {
-  try {
-    const myRole = _userRole(req.user);
-    let sql, partnerColumn;
-    if (myRole === 'roofer') {
-      sql = "SELECT pl.id AS link_id, pl.created_at AS linked_at, u.id, u.email, u.full_name, u.firm_name, u.role FROM partner_links pl JOIN users u ON u.id = pl.pa_user_id WHERE pl.roofer_user_id = $1 ORDER BY pl.created_at DESC";
-    } else {
-      sql = "SELECT pl.id AS link_id, pl.created_at AS linked_at, u.id, u.email, u.full_name, u.firm_name, u.role FROM partner_links pl JOIN users u ON u.id = pl.roofer_user_id WHERE pl.pa_user_id = $1 ORDER BY pl.created_at DESC";
-    }
-    const r = await pool.query(sql, [req.user.id]);
-    res.json({ my_role: myRole, partners: r.rows });
-  } catch (err) {
-    console.error('[partners:list]', err);
-    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
-  }
-});
-
-app.delete('/partners/:partnerId', requireAuth, async (req, res) => {
-  try {
-    const partnerId = parseInt(req.params.partnerId);
-    if (!Number.isFinite(partnerId)) return res.status(400).json({ error: 'bad_partner_id' });
-    const myRole = _userRole(req.user);
-    let result;
-    if (myRole === 'roofer') {
-      result = await pool.query('DELETE FROM partner_links WHERE roofer_user_id = $1 AND pa_user_id = $2', [req.user.id, partnerId]);
-    } else {
-      result = await pool.query('DELETE FROM partner_links WHERE pa_user_id = $1 AND roofer_user_id = $2', [req.user.id, partnerId]);
-    }
-    res.json({ ok: true, removed: result.rowCount });
-  } catch (err) {
-    console.error('[partners:unlink]', err);
-    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
-  }
-});
-
-app.post('/partners/lead', requireAuth, async (req, res) => {
-  try {
-    const b = req.body || {};
-    const paUserId = parseInt(b.pa_user_id);
-    if (!Number.isFinite(paUserId)) return res.status(400).json({ error: 'pa_user_id_required' });
-    const name = String(b.name || '').trim();
-    if (!name) return res.status(400).json({ error: 'name_required' });
-    // Verify partner_link exists in either direction
-    const linkRes = await pool.query("SELECT id FROM partner_links WHERE (roofer_user_id = $1 AND pa_user_id = $2) OR (pa_user_id = $1 AND roofer_user_id = $2) LIMIT 1", [req.user.id, paUserId]);
-    if (!linkRes.rowCount) return res.status(403).json({ error: 'not_linked' });
-    // Look up the recipient PA's org_id (for org-scoped pipelines)
-    const paRes = await pool.query('SELECT id, org_id, full_name, firm_name FROM users WHERE id = $1', [paUserId]);
-    if (!paRes.rowCount) return res.status(404).json({ error: 'pa_not_found' });
-    const pa = paRes.rows[0];
-    // Look up the calling roofer for the source label
-    const meRes = await pool.query('SELECT id, full_name, firm_name, email FROM users WHERE id = $1', [req.user.id]);
-    const me = meRes.rows[0] || {};
-    const myLabel = me.firm_name || me.full_name || me.email || 'a partner roofer';
-    const source = (b.source ? String(b.source) : ('From roofer ' + myLabel)).slice(0, 200);
-    const ins = await pool.query(
-      "INSERT INTO leads (org_id, name, email, phone, address, carrier, claim_number, source, notes, assigned_to, assigned_at, assigned_by, status, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11, 'new', $12) RETURNING id",
-      [
-        pa.org_id || null,
-        name,
-        String(b.email || '').trim() || null,
-        String(b.phone || '').trim() || null,
-        String(b.address || '').trim() || null,
-        String(b.carrier || '').trim() || null,
-        String(b.claim_number || '').trim() || null,
-        source,
-        String(b.notes || '').trim() || null,
-        paUserId,
-        req.user.id,
-        req.user.id
-      ]
-    );
-    return res.status(201).json({ ok: true, lead_id: ins.rows[0].id });
-  } catch (err) {
-    console.error('[partners:lead]', err);
-    return res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
-  }
-});
-
-app.post('/partners/event', requireAuth, async (req, res) => {
-  try {
-    const b = req.body || {};
-    const shareWithId = parseInt(b.share_with_user_id);
-    if (!Number.isFinite(shareWithId)) return res.status(400).json({ error: 'share_with_user_id_required' });
-    const title = String(b.title || '').trim();
-    if (!title) return res.status(400).json({ error: 'title_required' });
-    if (!b.starts_at) return res.status(400).json({ error: 'starts_at_required' });
-    // Verify partner link in either direction
-    const linkRes = await pool.query("SELECT id FROM partner_links WHERE (roofer_user_id = $1 AND pa_user_id = $2) OR (pa_user_id = $1 AND roofer_user_id = $2) LIMIT 1", [req.user.id, shareWithId]);
-    if (!linkRes.rowCount) return res.status(403).json({ error: 'not_linked' });
-    // Look up recipient's org_id
-    const targetRes = await pool.query('SELECT id, org_id FROM users WHERE id = $1', [shareWithId]);
-    if (!targetRes.rowCount) return res.status(404).json({ error: 'user_not_found' });
-    const target = targetRes.rows[0];
-    // Look up caller for label
-    const meRes = await pool.query('SELECT id, full_name, firm_name, email FROM users WHERE id = $1', [req.user.id]);
-    const me = meRes.rows[0] || {};
-    const myLabel = me.firm_name || me.full_name || me.email || 'partner';
-    const sharedDescription = ('Shared by ' + myLabel + (b.description ? ('\n\n' + b.description) : ''));
-    const ins = await pool.query(
-      "INSERT INTO events (user_id, org_id, claim_local_id, title, description, starts_at, ends_at, all_day, location) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
-      [
-        shareWithId,
-        target.org_id || null,
-        null,
-        title,
-        sharedDescription,
-        b.starts_at,
-        b.ends_at || null,
-        !!b.all_day,
-        b.location || null
-      ]
-    );
-    return res.status(201).json({ ok: true, event_id: ins.rows[0].id });
-  } catch (err) {
-    console.error('[partners:event]', err);
-    return res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
-  }
-});
-
-// DEBUG: dump all registered Express routes
-console.log('[routes-dump] start');
-let _rcount = 0;
-app._router.stack.forEach((m) => {
-  if (m.route) {
-    const methods = Object.keys(m.route.methods).join(',').toUpperCase();
-    console.log('  ' + methods + ' ' + m.route.path);
-    _rcount++;
-  }
-});
-console.log('[routes-dump] total: ' + _rcount);
-
-// Smoke test endpoint
-app.get('/zz-smoke', (req, res) => res.json({ ok: true, ts: Date.now() }));
-
-
-// ==================== Partner lead files (roofer attachments + contract flag) ====================
-(async function _ample_plf_migration() {
-  try {
-    if (typeof pool === "undefined") return;
-    await pool.query("CREATE TABLE IF NOT EXISTS partner_lead_files (id SERIAL PRIMARY KEY, lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE, uploader_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, mime_type TEXT, size_bytes INTEGER, data_base64 TEXT NOT NULL, is_signed_contract BOOLEAN DEFAULT FALSE, created_at TIMESTAMPTZ DEFAULT now())");
-    await pool.query("CREATE INDEX IF NOT EXISTS idx_plf_lead ON partner_lead_files(lead_id)");
-    await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS has_signed_contract BOOLEAN DEFAULT FALSE");
-    console.log("[ample] partner_lead_files migration ok");
-  } catch (err) {
-    console.error("[ample] partner_lead_files migration failed:", err && err.message);
-  }
-})();
-
-async function _ample_lead_access(leadId, user) {
-  const r = await pool.query("SELECT id, created_by, assigned_to, org_id FROM leads WHERE id = $1", [leadId]);
-  if (!r.rowCount) return { found: false };
-  const lead = r.rows[0];
-  const me = user.id;
-  let ok = lead.created_by === me || lead.assigned_to === me || (user.org_role === "owner" && lead.org_id === user.org_id);
-  if (!ok) {
-    const lk = await pool.query("SELECT 1 FROM partner_links WHERE (pa_user_id = $1 AND roofer_user_id = $2) OR (roofer_user_id = $1 AND pa_user_id = $2) LIMIT 1", [me, lead.created_by]);
-    ok = lk.rowCount > 0;
-  }
-  return { found: true, ok: ok, lead: lead };
-}
-
-app.post("/partners/lead/:lead_id/files", requireAuth, async (req, res) => {
-  try {
-    const leadId = parseInt(req.params.lead_id);
-    if (!Number.isFinite(leadId)) return res.status(400).json({ error: "bad_lead_id" });
-    const b = req.body || {};
-    const name = String(b.name || "").slice(0, 256).trim();
-    if (!name) return res.status(400).json({ error: "name_required" });
-    const data = String(b.data_base64 || "");
-    if (!data) return res.status(400).json({ error: "data_required" });
-    if (data.length > 14000000) return res.status(413).json({ error: "file_too_large", max: "10MB" });
-    const mime = String(b.mime_type || "").slice(0, 128) || null;
-    const size = Number.isFinite(b.size_bytes) ? parseInt(b.size_bytes) : null;
-    const isContract = !!b.is_signed_contract;
-    const access = await _ample_lead_access(leadId, req.user);
-    if (!access.found) return res.status(404).json({ error: "lead_not_found" });
-    if (!access.ok) return res.status(403).json({ error: "forbidden" });
-    const ins = await pool.query("INSERT INTO partner_lead_files (lead_id, uploader_user_id, name, mime_type, size_bytes, data_base64, is_signed_contract) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at", [leadId, req.user.id, name, mime, size, data, isContract]);
-    if (isContract) {
-      await pool.query("UPDATE leads SET has_signed_contract = TRUE, updated_at = now() WHERE id = $1", [leadId]);
-    }
-    return res.status(201).json({ ok: true, file_id: ins.rows[0].id, created_at: ins.rows[0].created_at });
-  } catch (err) {
-    console.error("[partners:lead-files POST]", err);
-    return res.status(500).json({ error: "upload_failed", detail: String((err && err.message) || err).slice(0, 200) });
-  }
-});
-
-app.get("/partners/lead/:lead_id/files", requireAuth, async (req, res) => {
-  try {
-    const leadId = parseInt(req.params.lead_id);
-    if (!Number.isFinite(leadId)) return res.status(400).json({ error: "bad_lead_id" });
-    const access = await _ample_lead_access(leadId, req.user);
-    if (!access.found) return res.status(404).json({ error: "lead_not_found" });
-    if (!access.ok) return res.status(403).json({ error: "forbidden" });
-    const r = await pool.query("SELECT id, name, mime_type, size_bytes, is_signed_contract, uploader_user_id, created_at FROM partner_lead_files WHERE lead_id = $1 ORDER BY created_at ASC", [leadId]);
-    return res.json({ files: r.rows });
-  } catch (err) {
-    console.error("[partners:lead-files GET]", err);
-    return res.status(500).json({ error: "list_failed", detail: String((err && err.message) || err).slice(0, 200) });
-  }
-});
-
-app.get("/partners/lead-files/:file_id", requireAuth, async (req, res) => {
-  try {
-    const fid = parseInt(req.params.file_id);
-    if (!Number.isFinite(fid)) return res.status(400).json({ error: "bad_file_id" });
-    const r = await pool.query("SELECT plf.*, l.created_by AS lcb, l.assigned_to AS lat, l.org_id AS log FROM partner_lead_files plf JOIN leads l ON l.id = plf.lead_id WHERE plf.id = $1", [fid]);
-    if (!r.rowCount) return res.status(404).json({ error: "file_not_found" });
-    const f = r.rows[0];
-    const me = req.user.id;
-    let ok = f.lcb === me || f.lat === me || (req.user.org_role === "owner" && f.log === req.user.org_id);
-    if (!ok) {
-      const lk = await pool.query("SELECT 1 FROM partner_links WHERE (pa_user_id = $1 AND roofer_user_id = $2) OR (roofer_user_id = $1 AND pa_user_id = $2) LIMIT 1", [me, f.lcb]);
-      ok = lk.rowCount > 0;
-    }
-    if (!ok) return res.status(403).json({ error: "forbidden" });
-    return res.json({ id: f.id, name: f.name, mime_type: f.mime_type, size_bytes: f.size_bytes, is_signed_contract: f.is_signed_contract, data_base64: f.data_base64, created_at: f.created_at });
-  } catch (err) {
-    console.error("[partners:lead-files single GET]", err);
-    return res.status(500).json({ error: "fetch_failed", detail: String((err && err.message) || err).slice(0, 200) });
-  }
-});
-
-app.delete("/partners/lead-files/:file_id", requireAuth, async (req, res) => {
-  try {
-    const fid = parseInt(req.params.file_id);
-    if (!Number.isFinite(fid)) return res.status(400).json({ error: "bad_file_id" });
-    const r = await pool.query("SELECT plf.uploader_user_id, l.created_by AS lcb, l.org_id AS log FROM partner_lead_files plf JOIN leads l ON l.id = plf.lead_id WHERE plf.id = $1", [fid]);
-    if (!r.rowCount) return res.json({ ok: true });
-    const row = r.rows[0];
-    const isUploader = row.uploader_user_id === req.user.id;
-    const isOwner = row.lcb === req.user.id || (req.user.org_role === "owner" && row.log === req.user.org_id);
-    if (!isUploader && !isOwner) return res.status(403).json({ error: "forbidden" });
-    await pool.query("DELETE FROM partner_lead_files WHERE id = $1", [fid]);
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error("[partners:lead-files DELETE]", err);
-    return res.status(500).json({ error: "delete_failed", detail: String((err && err.message) || err).slice(0, 200) });
-  }
-});
-
-
-// POST /partners/lead-with-files — atomic create-lead + upload-files in one call. Returns lead_id + file_ids.
-app.post("/partners/lead-with-files", requireAuth, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const b = req.body || {};
-    const paUserId = parseInt(b.pa_user_id);
-    if (!Number.isFinite(paUserId)) return res.status(400).json({ error: "pa_user_id_required" });
-    const name = String(b.name || "").slice(0, 200).trim();
-    if (!name) return res.status(400).json({ error: "name_required" });
-    const email = b.email ? String(b.email).slice(0, 200).trim() : null;
-    const phone = b.phone ? String(b.phone).slice(0, 64).trim() : null;
-    const address = b.address ? String(b.address).slice(0, 500).trim() : null;
-    const notes = b.notes ? String(b.notes).slice(0, 4000) : null;
-    const files = Array.isArray(b.files) ? b.files : [];
-    if (files.length > 8) return res.status(400).json({ error: "too_many_files", max: 8 });
-    // Verify partner link exists in either direction
-    const lk = await client.query("SELECT id FROM partner_links WHERE (roofer_user_id = $1 AND pa_user_id = $2) OR (pa_user_id = $1 AND roofer_user_id = $2) LIMIT 1", [req.user.id, paUserId]);
-    if (!lk.rowCount) return res.status(403).json({ error: "not_linked" });
-    // Look up PA org info so the lead lands in the PA org
-    const paRes = await client.query("SELECT id, org_id, full_name, firm_name, email FROM users WHERE id = $1", [paUserId]);
-    if (!paRes.rowCount) return res.status(404).json({ error: "pa_not_found" });
-    const pa = paRes.rows[0];
-    // Look up roofer label for source line
-    const meRes = await client.query("SELECT id, full_name, firm_name, email FROM users WHERE id = $1", [req.user.id]);
-    const me = meRes.rows[0] || {};
-    const sourceLabel = "From roofer: " + (me.firm_name || me.full_name || me.email || ("user " + req.user.id));
-    const hasSigned = files.some(f => !!f.is_signed_contract);
-    await client.query("BEGIN");
-    const ins = await client.query("INSERT INTO leads (org_id, created_by, assigned_to, assigned_by, name, email, phone, address, source, notes, status, has_signed_contract) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, created_at", [pa.org_id || null, req.user.id, paUserId, req.user.id, name, email, phone, address, sourceLabel, notes, "new", hasSigned]);
-    const leadId = ins.rows[0].id;
-    const fileIds = [];
-    for (const f of files) {
-      const fname = String(f.name || "untitled").slice(0, 256).trim();
-      const data = String(f.data_base64 || "");
-      if (!data) continue;
-      if (data.length > 14000000) { await client.query("ROLLBACK"); return res.status(413).json({ error: "file_too_large", name: fname, max: "10MB" }); }
-      const mime = String(f.mime_type || "").slice(0, 128) || null;
-      const size = Number.isFinite(f.size_bytes) ? parseInt(f.size_bytes) : null;
-      const isContract = !!f.is_signed_contract;
-      const fr = await client.query("INSERT INTO partner_lead_files (lead_id, uploader_user_id, name, mime_type, size_bytes, data_base64, is_signed_contract) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id", [leadId, req.user.id, fname, mime, size, data, isContract]);
-      fileIds.push(fr.rows[0].id);
-    }
-    await client.query("COMMIT");
-    return res.status(201).json({ ok: true, lead_id: leadId, created_at: ins.rows[0].created_at, file_ids: fileIds, has_signed_contract: hasSigned });
-  } catch (err) {
-    try { await client.query("ROLLBACK"); } catch (e) {}
-    console.error("[partners:lead-with-files]", err);
-    return res.status(500).json({ error: "create_failed", detail: String((err && err.message) || err).slice(0, 200) });
-  } finally {
-    client.release();
-  }
-});
-
-// ============================================================
-// User cloud backup — automatic per-user snapshot of claim data
-// PUT /user/backup, GET /user/backup, GET /user/backup/meta
-// Frontend strips photos before pushing so payload stays small.
-// ============================================================
-let _userBackupTableEnsured = false;
-async function _ensureUserBackupTable() {
-  if (_userBackupTableEnsured) return;
-  await pool.query(
-    "CREATE TABLE IF NOT EXISTS user_backups (user_id INT PRIMARY KEY, payload JSONB NOT NULL, size_bytes INT, claim_count INT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
-  );
-  _userBackupTableEnsured = true;
-}
-
-app.put("/user/backup", requireAuth, async (req, res) => {
-  try {
-    await _ensureUserBackupTable();
-    const payload = req.body && req.body.payload;
-    if (!payload || typeof payload !== "object") return res.status(400).json({ error: "missing_payload" });
-    const serialized = JSON.stringify(payload);
-    const sizeBytes = Buffer.byteLength(serialized, "utf8");
-    if (sizeBytes > 25 * 1024 * 1024) return res.status(413).json({ error: "too_large", size_bytes: sizeBytes });
-    const claimCount = Array.isArray(payload.claims) ? payload.claims.length : 0;
-    await pool.query(
-      "INSERT INTO user_backups (user_id, payload, size_bytes, claim_count, updated_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (user_id) DO UPDATE SET payload = EXCLUDED.payload, size_bytes = EXCLUDED.size_bytes, claim_count = EXCLUDED.claim_count, updated_at = NOW()",
-      [req.user.id, payload, sizeBytes, claimCount]
-    );
-    return res.json({ ok: true, size_bytes: sizeBytes, claim_count: claimCount, updated_at: new Date().toISOString() });
-  } catch (err) {
-    console.error("[/user/backup PUT]", err);
-    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
-  }
-});
-
-app.get("/user/backup", requireAuth, async (req, res) => {
-  try {
-    await _ensureUserBackupTable();
-    const r = await pool.query("SELECT payload, size_bytes, claim_count, updated_at FROM user_backups WHERE user_id = $1", [req.user.id]);
-    if (!r.rows.length) return res.json({ payload: null });
-    const row = r.rows[0];
-    return res.json({ payload: row.payload, size_bytes: row.size_bytes, claim_count: row.claim_count, updated_at: row.updated_at });
-  } catch (err) {
-    console.error("[/user/backup GET]", err);
-    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
-  }
-});
-
-app.get("/user/backup/meta", requireAuth, async (req, res) => {
-  try {
-    await _ensureUserBackupTable();
-    const r = await pool.query("SELECT size_bytes, claim_count, updated_at FROM user_backups WHERE user_id = $1", [req.user.id]);
-    if (!r.rows.length) return res.json({ updated_at: null, size_bytes: 0, claim_count: 0 });
-    return res.json(r.rows[0]);
-  } catch (err) {
-    console.error("[/user/backup/meta GET]", err);
-    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
-  }
-});
-
-// ============================================================
-// PA → Roofer status sync
-// PA pushes their current pipeline stage for each claim that came from a roofer-lead.
-// Roofer polls back the latest stages for all leads they have sent.
-// ============================================================
-let _leadPaStatusesEnsured = false;
-async function _ensureLeadPaStatusesTable() {
-  if (_leadPaStatusesEnsured) return;
-  await pool.query(
-    "CREATE TABLE IF NOT EXISTS lead_pa_statuses (lead_id INT PRIMARY KEY, pa_user_id INT NOT NULL, stage TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
-  );
-  _leadPaStatusesEnsured = true;
-}
-
-// POST /partners/lead-status — PA pushes the current pipeline stage for one of their claims
-// Body: { lead_id, stage }
-app.post("/partners/lead-status", requireAuth, async (req, res) => {
-  try {
-    await _ensureLeadPaStatusesTable();
-    const leadId = parseInt(req.body && req.body.lead_id, 10);
-    const stage = String((req.body && req.body.stage) || "").slice(0, 64);
-    if (!leadId || !stage) return res.status(400).json({ error: "bad_input" });
-    // Verify this PA is actually assigned to this lead (only the PA who owns the lead can push status)
-    const lr = await pool.query("SELECT id, assigned_to_user_id, source_user_id FROM leads WHERE id = $1", [leadId]);
-    const lead = lr && lr.rows && lr.rows[0];
-    if (!lead) return res.status(404).json({ error: "lead_not_found" });
-    if (lead.assigned_to_user_id !== req.user.id) return res.status(403).json({ error: "not_authorized" });
-    await pool.query(
-      "INSERT INTO lead_pa_statuses (lead_id, pa_user_id, stage, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (lead_id) DO UPDATE SET stage = EXCLUDED.stage, pa_user_id = EXCLUDED.pa_user_id, updated_at = NOW()",
-      [leadId, req.user.id, stage]
-    );
-    return res.json({ ok: true, lead_id: leadId, stage: stage });
-  } catch (err) {
-    console.error("[/partners/lead-status POST]", err);
-    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
-  }
-});
-
-// GET /partners/sent-statuses — roofer pulls the current PA stage for every lead they sent
-app.get("/partners/sent-statuses", requireAuth, async (req, res) => {
-  try {
-    await _ensureLeadPaStatusesTable();
-    const r = await pool.query(
-      "SELECT l.id AS lead_id, l.name AS lead_name, lps.stage, lps.updated_at, lps.pa_user_id " +
-      "FROM leads l LEFT JOIN lead_pa_statuses lps ON lps.lead_id = l.id " +
-      "WHERE l.source_user_id = $1 " +
-      "ORDER BY lps.updated_at DESC NULLS LAST, l.id DESC",
-      [req.user.id]
-    );
-    return res.json({ statuses: r.rows || [] });
-  } catch (err) {
-    console.error("[/partners/sent-statuses GET]", err);
-    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
-  }
-});
-
-
-    app.listen(port, () => {
-      console.log(`[boot] HailGrade API listening on :${port}`);
-    });
-  } catch (err) {
-    console.error('[boot] failed', err);
-    process.exit(1);
-  }
-}
-
-boot();
+      const dup = await po
