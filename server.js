@@ -3118,12 +3118,39 @@ async function buildWidenedLor(srcBuf, opts = {}) {
             : (ct.indexOf("non") === 0) ? 70.5 : null;
   if (cbx !== null) p1.drawText("X", { x:cbx, y:H-(226.4+13.5), size:12, font:fb, color:BLACK });
 
-  // ---- inline body blanks (page 1), clamped to the real gaps ----
-  val(p1,p.insured_name,214,237,261,10);
-  const dol = _lorSplitDate(p.date_of_loss);
-  val(p1,dol.day,196.5,205.5,305.4,9);
-  val(p1,dol.my,246,372,305.4,11);
-  val(p1,p.property_address,210,548,327.6,11);
+  // ---- re-typeset the first body paragraph with WIDE blanks so the insured
+  // name, date of loss (day + month) and property address all have real room ----
+  {
+    const dol = _lorSplitDate(p.date_of_loss);
+    p1.drawRectangle({ x:60, y:H-347, width:496, height:97, color:WHITE });
+    const SIZE = 11, LH = 15.5, X0 = 62, X1 = 556;
+    let x = X0, y = 256;
+    const spaceW = (function(){ try { return f.widthOfTextAtSize(" ", SIZE); } catch(e){ return 3; } })();
+    const Wd = (s) => { try { return f.widthOfTextAtSize(s, SIZE); } catch(e){ return String(s).length*6; } };
+    const fitDraw = (s, bx, by, bw) => {
+      s = String(s == null ? "" : s); if (!s) return;
+      let fs = SIZE; try { while (fs > 6 && f.widthOfTextAtSize(s, fs) > bw - 2) fs -= 0.5; } catch(e){}
+      p1.drawText(s, { x: bx + 1, y: H-(by + SIZE), size: fs, font: f, color: BLACK });
+    };
+    const tokens = [];
+    const words = (s) => s.split(/(\s+)/).forEach(w => { if (w.trim() === "") tokens.push({ sp:1 }); else tokens.push({ t:w }); });
+    words("The undersigned insured(s)"); tokens.push({ sp:1 }); tokens.push({ blank:118, val:p.insured_name }); tokens.push({ sp:1 });
+    words("hereby retains Smith Adjusters to assist in the preparation, presentation, adjustment and negotiation of the claim for the loss which occurred on or about the"); tokens.push({ sp:1 }); tokens.push({ blank:34, val:dol.day }); tokens.push({ sp:1 });
+    words("day of"); tokens.push({ sp:1 }); tokens.push({ blank:120, val:dol.my }); tokens.push({ sp:1 });
+    words("on the property located at"); tokens.push({ sp:1 }); tokens.push({ blank:150, val:p.property_address }); words(".");
+    tokens.forEach((tok) => {
+      if (tok.sp) { x += spaceW; return; }
+      const w = tok.blank ? tok.blank : Wd(tok.t);
+      if (x + w > X1) { x = X0; y += LH; }
+      if (tok.blank) {
+        p1.drawLine({ start:{x:x, y:H-(y+SIZE+1)}, end:{x:x+w, y:H-(y+SIZE+1)}, thickness:0.7, color:BLACK });
+        fitDraw(tok.val, x, y, w);
+      } else {
+        p1.drawText(tok.t, { x:x, y:H-(y+SIZE), size:SIZE, font:f, color:BLACK });
+      }
+      x += w;
+    });
+  }
 
   // ---- fee percent (page 3) ----
   val(p3,p.fee_percent,340,378,442.5,12);
