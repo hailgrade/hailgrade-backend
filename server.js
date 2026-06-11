@@ -3334,7 +3334,6 @@ app.get("/contracts/lor-preview", requireAuth, async (req, res) => {
   }
 });
 /* ================= END LOR FROM SCRATCH ================= */
-
 /* ===================== LETTERS & FORMS ===================== */
 function _ltrFmtDate(v, mode){
   if(v==null||v==='') return '';
@@ -4475,4 +4474,462 @@ app.post('/partners/code', requireAuth, async (req, res) => {
     let code = null;
     for (let attempt = 0; attempt < 5; attempt++) {
       const candidate = _generatePartnerCode();
-      const dup = await po
+      const dup = await pool.query('SELECT 1 FROM partner_invite_codes WHERE code = $1', [candidate]);
+      if (!dup.rowCount) { code = candidate; break; }
+    }
+    if (!code) return res.status(500).json({ error: 'could_not_generate_code' });
+    await pool.query('INSERT INTO partner_invite_codes (code, issuer_user_id, issuer_role) VALUES ($1, $2, $3)', [code, req.user.id, myRole]);
+    res.json({ code, issuer_role: myRole, reused: false });
+  } catch (err) {
+    console.error('[partners:code]', err);
+    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.post('/partners/redeem', requireAuth, async (req, res) => {
+  try {
+    const code = String((req.body && req.body.code) || '').trim().toUpperCase();
+    if (!code || code.length !== 6) return res.status(400).json({ error: 'code_required' });
+    const cr = await pool.query('SELECT * FROM partner_invite_codes WHERE code = $1', [code]);
+    if (!cr.rowCount) return res.status(404).json({ error: 'code_not_found' });
+    const codeRow = cr.rows[0];
+    if (codeRow.redeemed_by_user_id) return res.status(409).json({ error: 'code_already_redeemed' });
+    if (codeRow.issuer_user_id === req.user.id) return res.status(400).json({ error: 'cant_redeem_own_code' });
+    const myRole = _userRole(req.user);
+    const issuerRole = String(codeRow.issuer_role || '').toLowerCase();
+    if (myRole === issuerRole) return res.status(400).json({ error: 'role_mismatch', message: 'This code is from another ' + issuerRole + '. You need a code from a ' + (myRole === 'roofer' ? 'PA' : 'roofer') + '.' });
+    const paId = (myRole === 'pa') ? req.user.id : codeRow.issuer_user_id;
+    const rooferId = (myRole === 'roofer') ? req.user.id : codeRow.issuer_user_id;
+    await pool.query('INSERT INTO partner_links (pa_user_id, roofer_user_id) VALUES ($1, $2) ON CONFLICT (pa_user_id, roofer_user_id) DO NOTHING', [paId, rooferId]);
+    await pool.query('UPDATE partner_invite_codes SET redeemed_by_user_id = $1, redeemed_at = now() WHERE id = $2', [req.user.id, codeRow.id]);
+    const partnerId = (myRole === 'pa') ? rooferId : paId;
+    const pu = await pool.query('SELECT id, email, full_name, firm_name, role FROM users WHERE id = $1', [partnerId]);
+    res.json({ ok: true, partner: pu.rows[0] || null });
+  } catch (err) {
+    console.error('[partners:redeem]', err);
+    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.get('/partners', requireAuth, async (req, res) => {
+  try {
+    const myRole = _userRole(req.user);
+    let sql, partnerColumn;
+    if (myRole === 'roofer') {
+      sql = "SELECT pl.id AS link_id, pl.created_at AS linked_at, u.id, u.email, u.full_name, u.firm_name, u.role FROM partner_links pl JOIN users u ON u.id = pl.pa_user_id WHERE pl.roofer_user_id = $1 ORDER BY pl.created_at DESC";
+    } else {
+      sql = "SELECT pl.id AS link_id, pl.created_at AS linked_at, u.id, u.email, u.full_name, u.firm_name, u.role FROM partner_links pl JOIN users u ON u.id = pl.roofer_user_id WHERE pl.pa_user_id = $1 ORDER BY pl.created_at DESC";
+    }
+    const r = await pool.query(sql, [req.user.id]);
+    res.json({ my_role: myRole, partners: r.rows });
+  } catch (err) {
+    console.error('[partners:list]', err);
+    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.delete('/partners/:partnerId', requireAuth, async (req, res) => {
+  try {
+    const partnerId = parseInt(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ error: 'bad_partner_id' });
+    const myRole = _userRole(req.user);
+    let result;
+    if (myRole === 'roofer') {
+      result = await pool.query('DELETE FROM partner_links WHERE roofer_user_id = $1 AND pa_user_id = $2', [req.user.id, partnerId]);
+    } else {
+      result = await pool.query('DELETE FROM partner_links WHERE pa_user_id = $1 AND roofer_user_id = $2', [req.user.id, partnerId]);
+    }
+    res.json({ ok: true, removed: result.rowCount });
+  } catch (err) {
+    console.error('[partners:unlink]', err);
+    res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.post('/partners/lead', requireAuth, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const paUserId = parseInt(b.pa_user_id);
+    if (!Number.isFinite(paUserId)) return res.status(400).json({ error: 'pa_user_id_required' });
+    const name = String(b.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name_required' });
+    // Verify partner_link exists in either direction
+    const linkRes = await pool.query("SELECT id FROM partner_links WHERE (roofer_user_id = $1 AND pa_user_id = $2) OR (pa_user_id = $1 AND roofer_user_id = $2) LIMIT 1", [req.user.id, paUserId]);
+    if (!linkRes.rowCount) return res.status(403).json({ error: 'not_linked' });
+    // Look up the recipient PA's org_id (for org-scoped pipelines)
+    const paRes = await pool.query('SELECT id, org_id, full_name, firm_name FROM users WHERE id = $1', [paUserId]);
+    if (!paRes.rowCount) return res.status(404).json({ error: 'pa_not_found' });
+    const pa = paRes.rows[0];
+    // Look up the calling roofer for the source label
+    const meRes = await pool.query('SELECT id, full_name, firm_name, email FROM users WHERE id = $1', [req.user.id]);
+    const me = meRes.rows[0] || {};
+    const myLabel = me.firm_name || me.full_name || me.email || 'a partner roofer';
+    const source = (b.source ? String(b.source) : ('From roofer ' + myLabel)).slice(0, 200);
+    const ins = await pool.query(
+      "INSERT INTO leads (org_id, name, email, phone, address, carrier, claim_number, source, notes, assigned_to, assigned_at, assigned_by, status, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11, 'new', $12) RETURNING id",
+      [
+        pa.org_id || null,
+        name,
+        String(b.email || '').trim() || null,
+        String(b.phone || '').trim() || null,
+        String(b.address || '').trim() || null,
+        String(b.carrier || '').trim() || null,
+        String(b.claim_number || '').trim() || null,
+        source,
+        String(b.notes || '').trim() || null,
+        paUserId,
+        req.user.id,
+        req.user.id
+      ]
+    );
+    return res.status(201).json({ ok: true, lead_id: ins.rows[0].id });
+  } catch (err) {
+    console.error('[partners:lead]', err);
+    return res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.post('/partners/event', requireAuth, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const shareWithId = parseInt(b.share_with_user_id);
+    if (!Number.isFinite(shareWithId)) return res.status(400).json({ error: 'share_with_user_id_required' });
+    const title = String(b.title || '').trim();
+    if (!title) return res.status(400).json({ error: 'title_required' });
+    if (!b.starts_at) return res.status(400).json({ error: 'starts_at_required' });
+    // Verify partner link in either direction
+    const linkRes = await pool.query("SELECT id FROM partner_links WHERE (roofer_user_id = $1 AND pa_user_id = $2) OR (pa_user_id = $1 AND roofer_user_id = $2) LIMIT 1", [req.user.id, shareWithId]);
+    if (!linkRes.rowCount) return res.status(403).json({ error: 'not_linked' });
+    // Look up recipient's org_id
+    const targetRes = await pool.query('SELECT id, org_id FROM users WHERE id = $1', [shareWithId]);
+    if (!targetRes.rowCount) return res.status(404).json({ error: 'user_not_found' });
+    const target = targetRes.rows[0];
+    // Look up caller for label
+    const meRes = await pool.query('SELECT id, full_name, firm_name, email FROM users WHERE id = $1', [req.user.id]);
+    const me = meRes.rows[0] || {};
+    const myLabel = me.firm_name || me.full_name || me.email || 'partner';
+    const sharedDescription = ('Shared by ' + myLabel + (b.description ? ('\n\n' + b.description) : ''));
+    const ins = await pool.query(
+      "INSERT INTO events (user_id, org_id, claim_local_id, title, description, starts_at, ends_at, all_day, location) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
+      [
+        shareWithId,
+        target.org_id || null,
+        null,
+        title,
+        sharedDescription,
+        b.starts_at,
+        b.ends_at || null,
+        !!b.all_day,
+        b.location || null
+      ]
+    );
+    return res.status(201).json({ ok: true, event_id: ins.rows[0].id });
+  } catch (err) {
+    console.error('[partners:event]', err);
+    return res.status(500).json({ error: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+// DEBUG: dump all registered Express routes
+console.log('[routes-dump] start');
+let _rcount = 0;
+app._router.stack.forEach((m) => {
+  if (m.route) {
+    const methods = Object.keys(m.route.methods).join(',').toUpperCase();
+    console.log('  ' + methods + ' ' + m.route.path);
+    _rcount++;
+  }
+});
+console.log('[routes-dump] total: ' + _rcount);
+
+// Smoke test endpoint
+app.get('/zz-smoke', (req, res) => res.json({ ok: true, ts: Date.now() }));
+
+
+// ==================== Partner lead files (roofer attachments + contract flag) ====================
+(async function _ample_plf_migration() {
+  try {
+    if (typeof pool === "undefined") return;
+    await pool.query("CREATE TABLE IF NOT EXISTS partner_lead_files (id SERIAL PRIMARY KEY, lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE, uploader_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT NOT NULL, mime_type TEXT, size_bytes INTEGER, data_base64 TEXT NOT NULL, is_signed_contract BOOLEAN DEFAULT FALSE, created_at TIMESTAMPTZ DEFAULT now())");
+    await pool.query("CREATE INDEX IF NOT EXISTS idx_plf_lead ON partner_lead_files(lead_id)");
+    await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS has_signed_contract BOOLEAN DEFAULT FALSE");
+    console.log("[ample] partner_lead_files migration ok");
+  } catch (err) {
+    console.error("[ample] partner_lead_files migration failed:", err && err.message);
+  }
+})();
+
+async function _ample_lead_access(leadId, user) {
+  const r = await pool.query("SELECT id, created_by, assigned_to, org_id FROM leads WHERE id = $1", [leadId]);
+  if (!r.rowCount) return { found: false };
+  const lead = r.rows[0];
+  const me = user.id;
+  let ok = lead.created_by === me || lead.assigned_to === me || (user.org_role === "owner" && lead.org_id === user.org_id);
+  if (!ok) {
+    const lk = await pool.query("SELECT 1 FROM partner_links WHERE (pa_user_id = $1 AND roofer_user_id = $2) OR (roofer_user_id = $1 AND pa_user_id = $2) LIMIT 1", [me, lead.created_by]);
+    ok = lk.rowCount > 0;
+  }
+  return { found: true, ok: ok, lead: lead };
+}
+
+app.post("/partners/lead/:lead_id/files", requireAuth, async (req, res) => {
+  try {
+    const leadId = parseInt(req.params.lead_id);
+    if (!Number.isFinite(leadId)) return res.status(400).json({ error: "bad_lead_id" });
+    const b = req.body || {};
+    const name = String(b.name || "").slice(0, 256).trim();
+    if (!name) return res.status(400).json({ error: "name_required" });
+    const data = String(b.data_base64 || "");
+    if (!data) return res.status(400).json({ error: "data_required" });
+    if (data.length > 14000000) return res.status(413).json({ error: "file_too_large", max: "10MB" });
+    const mime = String(b.mime_type || "").slice(0, 128) || null;
+    const size = Number.isFinite(b.size_bytes) ? parseInt(b.size_bytes) : null;
+    const isContract = !!b.is_signed_contract;
+    const access = await _ample_lead_access(leadId, req.user);
+    if (!access.found) return res.status(404).json({ error: "lead_not_found" });
+    if (!access.ok) return res.status(403).json({ error: "forbidden" });
+    const ins = await pool.query("INSERT INTO partner_lead_files (lead_id, uploader_user_id, name, mime_type, size_bytes, data_base64, is_signed_contract) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, created_at", [leadId, req.user.id, name, mime, size, data, isContract]);
+    if (isContract) {
+      await pool.query("UPDATE leads SET has_signed_contract = TRUE, updated_at = now() WHERE id = $1", [leadId]);
+    }
+    return res.status(201).json({ ok: true, file_id: ins.rows[0].id, created_at: ins.rows[0].created_at });
+  } catch (err) {
+    console.error("[partners:lead-files POST]", err);
+    return res.status(500).json({ error: "upload_failed", detail: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.get("/partners/lead/:lead_id/files", requireAuth, async (req, res) => {
+  try {
+    const leadId = parseInt(req.params.lead_id);
+    if (!Number.isFinite(leadId)) return res.status(400).json({ error: "bad_lead_id" });
+    const access = await _ample_lead_access(leadId, req.user);
+    if (!access.found) return res.status(404).json({ error: "lead_not_found" });
+    if (!access.ok) return res.status(403).json({ error: "forbidden" });
+    const r = await pool.query("SELECT id, name, mime_type, size_bytes, is_signed_contract, uploader_user_id, created_at FROM partner_lead_files WHERE lead_id = $1 ORDER BY created_at ASC", [leadId]);
+    return res.json({ files: r.rows });
+  } catch (err) {
+    console.error("[partners:lead-files GET]", err);
+    return res.status(500).json({ error: "list_failed", detail: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.get("/partners/lead-files/:file_id", requireAuth, async (req, res) => {
+  try {
+    const fid = parseInt(req.params.file_id);
+    if (!Number.isFinite(fid)) return res.status(400).json({ error: "bad_file_id" });
+    const r = await pool.query("SELECT plf.*, l.created_by AS lcb, l.assigned_to AS lat, l.org_id AS log FROM partner_lead_files plf JOIN leads l ON l.id = plf.lead_id WHERE plf.id = $1", [fid]);
+    if (!r.rowCount) return res.status(404).json({ error: "file_not_found" });
+    const f = r.rows[0];
+    const me = req.user.id;
+    let ok = f.lcb === me || f.lat === me || (req.user.org_role === "owner" && f.log === req.user.org_id);
+    if (!ok) {
+      const lk = await pool.query("SELECT 1 FROM partner_links WHERE (pa_user_id = $1 AND roofer_user_id = $2) OR (roofer_user_id = $1 AND pa_user_id = $2) LIMIT 1", [me, f.lcb]);
+      ok = lk.rowCount > 0;
+    }
+    if (!ok) return res.status(403).json({ error: "forbidden" });
+    return res.json({ id: f.id, name: f.name, mime_type: f.mime_type, size_bytes: f.size_bytes, is_signed_contract: f.is_signed_contract, data_base64: f.data_base64, created_at: f.created_at });
+  } catch (err) {
+    console.error("[partners:lead-files single GET]", err);
+    return res.status(500).json({ error: "fetch_failed", detail: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+app.delete("/partners/lead-files/:file_id", requireAuth, async (req, res) => {
+  try {
+    const fid = parseInt(req.params.file_id);
+    if (!Number.isFinite(fid)) return res.status(400).json({ error: "bad_file_id" });
+    const r = await pool.query("SELECT plf.uploader_user_id, l.created_by AS lcb, l.org_id AS log FROM partner_lead_files plf JOIN leads l ON l.id = plf.lead_id WHERE plf.id = $1", [fid]);
+    if (!r.rowCount) return res.json({ ok: true });
+    const row = r.rows[0];
+    const isUploader = row.uploader_user_id === req.user.id;
+    const isOwner = row.lcb === req.user.id || (req.user.org_role === "owner" && row.log === req.user.org_id);
+    if (!isUploader && !isOwner) return res.status(403).json({ error: "forbidden" });
+    await pool.query("DELETE FROM partner_lead_files WHERE id = $1", [fid]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("[partners:lead-files DELETE]", err);
+    return res.status(500).json({ error: "delete_failed", detail: String((err && err.message) || err).slice(0, 200) });
+  }
+});
+
+
+// POST /partners/lead-with-files — atomic create-lead + upload-files in one call. Returns lead_id + file_ids.
+app.post("/partners/lead-with-files", requireAuth, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const b = req.body || {};
+    const paUserId = parseInt(b.pa_user_id);
+    if (!Number.isFinite(paUserId)) return res.status(400).json({ error: "pa_user_id_required" });
+    const name = String(b.name || "").slice(0, 200).trim();
+    if (!name) return res.status(400).json({ error: "name_required" });
+    const email = b.email ? String(b.email).slice(0, 200).trim() : null;
+    const phone = b.phone ? String(b.phone).slice(0, 64).trim() : null;
+    const address = b.address ? String(b.address).slice(0, 500).trim() : null;
+    const notes = b.notes ? String(b.notes).slice(0, 4000) : null;
+    const files = Array.isArray(b.files) ? b.files : [];
+    if (files.length > 8) return res.status(400).json({ error: "too_many_files", max: 8 });
+    // Verify partner link exists in either direction
+    const lk = await client.query("SELECT id FROM partner_links WHERE (roofer_user_id = $1 AND pa_user_id = $2) OR (pa_user_id = $1 AND roofer_user_id = $2) LIMIT 1", [req.user.id, paUserId]);
+    if (!lk.rowCount) return res.status(403).json({ error: "not_linked" });
+    // Look up PA org info so the lead lands in the PA org
+    const paRes = await client.query("SELECT id, org_id, full_name, firm_name, email FROM users WHERE id = $1", [paUserId]);
+    if (!paRes.rowCount) return res.status(404).json({ error: "pa_not_found" });
+    const pa = paRes.rows[0];
+    // Look up roofer label for source line
+    const meRes = await client.query("SELECT id, full_name, firm_name, email FROM users WHERE id = $1", [req.user.id]);
+    const me = meRes.rows[0] || {};
+    const sourceLabel = "From roofer: " + (me.firm_name || me.full_name || me.email || ("user " + req.user.id));
+    const hasSigned = files.some(f => !!f.is_signed_contract);
+    await client.query("BEGIN");
+    const ins = await client.query("INSERT INTO leads (org_id, created_by, assigned_to, assigned_by, name, email, phone, address, source, notes, status, has_signed_contract) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, created_at", [pa.org_id || null, req.user.id, paUserId, req.user.id, name, email, phone, address, sourceLabel, notes, "new", hasSigned]);
+    const leadId = ins.rows[0].id;
+    const fileIds = [];
+    for (const f of files) {
+      const fname = String(f.name || "untitled").slice(0, 256).trim();
+      const data = String(f.data_base64 || "");
+      if (!data) continue;
+      if (data.length > 14000000) { await client.query("ROLLBACK"); return res.status(413).json({ error: "file_too_large", name: fname, max: "10MB" }); }
+      const mime = String(f.mime_type || "").slice(0, 128) || null;
+      const size = Number.isFinite(f.size_bytes) ? parseInt(f.size_bytes) : null;
+      const isContract = !!f.is_signed_contract;
+      const fr = await client.query("INSERT INTO partner_lead_files (lead_id, uploader_user_id, name, mime_type, size_bytes, data_base64, is_signed_contract) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id", [leadId, req.user.id, fname, mime, size, data, isContract]);
+      fileIds.push(fr.rows[0].id);
+    }
+    await client.query("COMMIT");
+    return res.status(201).json({ ok: true, lead_id: leadId, created_at: ins.rows[0].created_at, file_ids: fileIds, has_signed_contract: hasSigned });
+  } catch (err) {
+    try { await client.query("ROLLBACK"); } catch (e) {}
+    console.error("[partners:lead-with-files]", err);
+    return res.status(500).json({ error: "create_failed", detail: String((err && err.message) || err).slice(0, 200) });
+  } finally {
+    client.release();
+  }
+});
+
+// ============================================================
+// User cloud backup — automatic per-user snapshot of claim data
+// PUT /user/backup, GET /user/backup, GET /user/backup/meta
+// Frontend strips photos before pushing so payload stays small.
+// ============================================================
+let _userBackupTableEnsured = false;
+async function _ensureUserBackupTable() {
+  if (_userBackupTableEnsured) return;
+  await pool.query(
+    "CREATE TABLE IF NOT EXISTS user_backups (user_id INT PRIMARY KEY, payload JSONB NOT NULL, size_bytes INT, claim_count INT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+  );
+  _userBackupTableEnsured = true;
+}
+
+app.put("/user/backup", requireAuth, async (req, res) => {
+  try {
+    await _ensureUserBackupTable();
+    const payload = req.body && req.body.payload;
+    if (!payload || typeof payload !== "object") return res.status(400).json({ error: "missing_payload" });
+    const serialized = JSON.stringify(payload);
+    const sizeBytes = Buffer.byteLength(serialized, "utf8");
+    if (sizeBytes > 25 * 1024 * 1024) return res.status(413).json({ error: "too_large", size_bytes: sizeBytes });
+    const claimCount = Array.isArray(payload.claims) ? payload.claims.length : 0;
+    await pool.query(
+      "INSERT INTO user_backups (user_id, payload, size_bytes, claim_count, updated_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (user_id) DO UPDATE SET payload = EXCLUDED.payload, size_bytes = EXCLUDED.size_bytes, claim_count = EXCLUDED.claim_count, updated_at = NOW()",
+      [req.user.id, payload, sizeBytes, claimCount]
+    );
+    return res.json({ ok: true, size_bytes: sizeBytes, claim_count: claimCount, updated_at: new Date().toISOString() });
+  } catch (err) {
+    console.error("[/user/backup PUT]", err);
+    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
+  }
+});
+
+app.get("/user/backup", requireAuth, async (req, res) => {
+  try {
+    await _ensureUserBackupTable();
+    const r = await pool.query("SELECT payload, size_bytes, claim_count, updated_at FROM user_backups WHERE user_id = $1", [req.user.id]);
+    if (!r.rows.length) return res.json({ payload: null });
+    const row = r.rows[0];
+    return res.json({ payload: row.payload, size_bytes: row.size_bytes, claim_count: row.claim_count, updated_at: row.updated_at });
+  } catch (err) {
+    console.error("[/user/backup GET]", err);
+    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
+  }
+});
+
+app.get("/user/backup/meta", requireAuth, async (req, res) => {
+  try {
+    await _ensureUserBackupTable();
+    const r = await pool.query("SELECT size_bytes, claim_count, updated_at FROM user_backups WHERE user_id = $1", [req.user.id]);
+    if (!r.rows.length) return res.json({ updated_at: null, size_bytes: 0, claim_count: 0 });
+    return res.json(r.rows[0]);
+  } catch (err) {
+    console.error("[/user/backup/meta GET]", err);
+    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
+  }
+});
+
+// ============================================================
+// PA → Roofer status sync
+// PA pushes their current pipeline stage for each claim that came from a roofer-lead.
+// Roofer polls back the latest stages for all leads they have sent.
+// ============================================================
+let _leadPaStatusesEnsured = false;
+async function _ensureLeadPaStatusesTable() {
+  if (_leadPaStatusesEnsured) return;
+  await pool.query(
+    "CREATE TABLE IF NOT EXISTS lead_pa_statuses (lead_id INT PRIMARY KEY, pa_user_id INT NOT NULL, stage TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+  );
+  _leadPaStatusesEnsured = true;
+}
+
+// POST /partners/lead-status — PA pushes the current pipeline stage for one of their claims
+// Body: { lead_id, stage }
+app.post("/partners/lead-status", requireAuth, async (req, res) => {
+  try {
+    await _ensureLeadPaStatusesTable();
+    const leadId = parseInt(req.body && req.body.lead_id, 10);
+    const stage = String((req.body && req.body.stage) || "").slice(0, 64);
+    if (!leadId || !stage) return res.status(400).json({ error: "bad_input" });
+    // Verify this PA is actually assigned to this lead (only the PA who owns the lead can push status)
+    const lr = await pool.query("SELECT id, assigned_to_user_id, source_user_id FROM leads WHERE id = $1", [leadId]);
+    const lead = lr && lr.rows && lr.rows[0];
+    if (!lead) return res.status(404).json({ error: "lead_not_found" });
+    if (lead.assigned_to_user_id !== req.user.id) return res.status(403).json({ error: "not_authorized" });
+    await pool.query(
+      "INSERT INTO lead_pa_statuses (lead_id, pa_user_id, stage, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (lead_id) DO UPDATE SET stage = EXCLUDED.stage, pa_user_id = EXCLUDED.pa_user_id, updated_at = NOW()",
+      [leadId, req.user.id, stage]
+    );
+    return res.json({ ok: true, lead_id: leadId, stage: stage });
+  } catch (err) {
+    console.error("[/partners/lead-status POST]", err);
+    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
+  }
+});
+
+// GET /partners/sent-statuses — roofer pulls the current PA stage for every lead they sent
+app.get("/partners/sent-statuses", requireAuth, async (req, res) => {
+  try {
+    await _ensureLeadPaStatusesTable();
+    const r = await pool.query(
+      "SELECT l.id AS lead_id, l.name AS lead_name, lps.stage, lps.updated_at, lps.pa_user_id " +
+      "FROM leads l LEFT JOIN lead_pa_statuses lps ON lps.lead_id = l.id " +
+      "WHERE l.source_user_id = $1 " +
+      "ORDER BY lps.updated_at DESC NULLS LAST, l.id DESC",
+      [req.user.id]
+    );
+    return res.json({ statuses: r.rows || [] });
+  } catch (err) {
+    console.error("[/partners/sent-statuses GET]", err);
+    return res.status(500).json({ error: "server_error", message: (err && err.message) || "unknown" });
+  }
+});
+
+
+    app.listen(port, () => {
+      console.log(`[boot] HailGrade API listening on :${port}`);
+    });
+  } catch (err) {
+    console.error('[boot] failed', err);
+    process.exit(1);
+  }
+}
+
+boot();
