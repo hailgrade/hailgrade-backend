@@ -3062,6 +3062,79 @@ async function buildLorPdf(opts = {}) {
   return Buffer.from(await pdf.save());
 }
 
+/* ===================================================================
+   buildWidenedLor — takes the user's EXACT uploaded LOR PDF and only
+   widens the cramped page-1 fill-in field rows, then fills every blank
+   with the claim's values. Logo, body text, fonts, page count and
+   footer are left pixel-identical. Coordinates were measured from the
+   real document (pdftotext -bbox). pdf-lib origin is BOTTOM-LEFT, so a
+   top-left coordinate `t` becomes y = H - t.
+   =================================================================== */
+function _lorSplitDate(s) {
+  if (!s) return { day: "", my: "" };
+  s = String(s).trim();
+  const M = ["January","February","March","April","May","June","July",
+             "August","September","October","November","December"];
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return { day: String(+m[3]), my: M[+m[2]-1] + " " + m[1] };
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) { const y = m[3].length === 2 ? "20"+m[3] : m[3]; return { day: String(+m[2]), my: M[+m[1]-1] + " " + y }; }
+  return { day: "", my: "" };
+}
+
+async function buildWidenedLor(srcBuf, opts = {}) {
+  const p = opts.prefill || {};
+  const pdf = await PDFDocument.load(srcBuf);
+  const f  = await pdf.embedFont(StandardFonts.Helvetica);
+  const fb = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const pgs = pdf.getPages();
+  const p1 = pgs[0], p3 = pgs[2] || pgs[pgs.length-1], p4 = pgs[3] || pgs[pgs.length-1];
+  const H = 792, BLACK = rgb(0,0,0), WHITE = rgb(1,1,1);
+  const yb = (t) => H - t;
+  const wipe = (pg, t, b, x1=60, x2=556) => pg.drawRectangle({ x:x1, y:yb(b), width:x2-x1, height:b-t, color:WHITE });
+  const lab  = (pg, s, x, tt) => pg.drawText(s, { x, y:H-(tt+13), size:13, font:f, color:BLACK });
+  const line = (pg, x1, x2, tt) => pg.drawLine({ start:{x:x1,y:H-(tt+15.5)}, end:{x:x2,y:H-(tt+15.5)}, thickness:0.8, color:BLACK });
+  const val  = (pg, s, x1, x2, tt, size=12) => {
+    s = String(s == null ? "" : s); if (!s) return;
+    let fs = size; const mw = x2 - x1 - 6;
+    try { while (fs > 6 && f.widthOfTextAtSize(s, fs) > mw) fs -= 0.5; } catch (e) {}
+    pg.drawText(s, { x:x1+3, y:H-(tt+12.5), size:fs, font:f, color:BLACK });
+  };
+
+  // ---- widen + fill the 4 cramped field rows (page 1) ----
+  wipe(p1,162,189); lab(p1,"Insurance Company:",66,166.6); line(p1,182,400,166.6); val(p1,p.insurance_company,182,400,166.6);
+  lab(p1,"Policy #:",410,166.6); line(p1,458,548,166.6); val(p1,p.policy_number,458,548,166.6);
+  wipe(p1,195,221); lab(p1,"Claim #:",66,198.8); line(p1,112,292,198.8); val(p1,p.claim_number,112,292,198.8);
+  lab(p1,"Date of Loss:",302,198.8); line(p1,374,548,198.8); val(p1,p.date_of_loss,374,548,198.8);
+  wipe(p1,348,373); lab(p1,"Phone #:",65,351.9); line(p1,112,292,351.9); val(p1,p.phone,112,292,351.9);
+  lab(p1,"Email:",302,351.9); line(p1,340,548,351.9); val(p1,p.email,340,548,351.9);
+  wipe(p1,370,396); lab(p1,"Caused by:",65,374); line(p1,122,292,374); val(p1,p.caused_by,122,292,374);
+  lab(p1,"Probable Damage:",302,374); line(p1,400,548,374); val(p1,p.probable_damage,400,548,374);
+
+  // ---- claim-type checkbox X ----
+  const ct = String(p.claim_type || "").toLowerCase().replace(/[^a-z]/g,"");
+  const cbx = ct.indexOf("reopen") === 0 ? 411.5
+            : (ct.indexOf("emergency") === 0 || ct.indexOf("supplement") === 0) ? 220
+            : (ct.indexOf("non") === 0) ? 70.5 : null;
+  if (cbx !== null) p1.drawText("X", { x:cbx, y:H-(226.4+13.5), size:12, font:fb, color:BLACK });
+
+  // ---- inline body blanks (page 1), clamped to the real gaps ----
+  val(p1,p.insured_name,214,237,261,10);
+  const dol = _lorSplitDate(p.date_of_loss);
+  val(p1,dol.day,196.5,205.5,305.4,9);
+  val(p1,dol.my,246,372,305.4,11);
+  val(p1,p.property_address,210,548,327.6,11);
+
+  // ---- fee percent (page 3) ----
+  val(p3,p.fee_percent,340,378,442.5,12);
+
+  // ---- insured names (page 4) ----
+  val(p4,p.insured_1_name,118,250,171.18,11);
+  val(p4,p.insured_2_name,262,440,171.18,11);
+
+  return Buffer.from(await pdf.save());
+}
+
 /* =================== POST /contracts/send-lor =================== */
 app.post("/contracts/send-lor", requireAuth, async (req, res) => {
   try {
@@ -3076,10 +3149,19 @@ app.post("/contracts/send-lor", requireAuth, async (req, res) => {
     const signer2Email = String(body.signer2_email || "").trim();
     const useSigner2   = !!signer2Email;
 
-    const pdfBytes = await buildLorPdf({
-      prefill: body.prefill || {},
-      use_signer2: useSigner2,
-    });
+    // Use the user's EXACT uploaded LOR PDF, widened in the fill-in areas and
+    // filled with this claim's values. Fall back to the code-built LOR only if
+    // the template can't be loaded, so a send never hard-fails.
+    let pdfBytes, usedWidened = false;
+    try {
+      const { LOR_TEMPLATE_B64 } = await import("./lor-template-b64.js");
+      const srcBuf = Buffer.from(LOR_TEMPLATE_B64, "base64");
+      pdfBytes = await buildWidenedLor(srcBuf, { prefill: body.prefill || {} });
+      usedWidened = true;
+    } catch (e) {
+      console.error("[contracts/send-lor] widened template failed, using buildLorPdf", e);
+      pdfBytes = await buildLorPdf({ prefill: body.prefill || {}, use_signer2: useSigner2 });
+    }
 
     const claimName = body.claim_name || "";
     const form = new FormData();
@@ -3096,19 +3178,21 @@ app.post("/contracts/send-lor", requireAuth, async (req, res) => {
     }
     form.append("cc_email_addresses[0]", req.user.email);
     form.append("test_mode",      "1");
-    // Explicit widget placement (top-left origin, PDF points). No text-tag parsing.
+    // Explicit widget placement (top-left origin, PDF points). Coordinates
+    // measured from the user's real LOR: initials line at the bottom of every
+    // page, and the two signature/date lines + PA line on page 4.
     const lorFields = [
-      { api_id: "init_p1", name: "Initial p1", type: "initials",    x: 462, y: 632, width: 90,  height: 25, signer: 0, page: 1, required: true },
-      { api_id: "init_p2", name: "Initial p2", type: "initials",    x: 462, y: 632, width: 90,  height: 25, signer: 0, page: 2, required: true },
-      { api_id: "init_p3", name: "Initial p3", type: "initials",    x: 462, y: 632, width: 90,  height: 25, signer: 0, page: 3, required: true },
-      { api_id: "init_p4", name: "Initial p4", type: "initials",    x: 462, y: 632, width: 90,  height: 25, signer: 0, page: 4, required: true },
-      { api_id: "sig_1",   name: "Signature",  type: "signature",   x: 72,  y: 212, width: 150, height: 25, signer: 0, page: 4, required: true },
-      { api_id: "date_1",  name: "Date",       type: "date_signed", x: 225, y: 212, width: 60,  height: 25, signer: 0, page: 4, required: true },
+      { api_id: "init_p1", name: "Initial p1", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 1, required: true },
+      { api_id: "init_p2", name: "Initial p2", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 2, required: true },
+      { api_id: "init_p3", name: "Initial p3", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 3, required: true },
+      { api_id: "init_p4", name: "Initial p4", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 4, required: true },
+      { api_id: "sig_1",   name: "Signature",  type: "signature",   x: 78,  y: 198, width: 125, height: 20, signer: 0, page: 4, required: true },
+      { api_id: "date_1",  name: "Date",       type: "date_signed", x: 210, y: 198, width: 85,  height: 20, signer: 0, page: 4, required: true },
     ];
     if (useSigner2) {
       lorFields.push(
-        { api_id: "sig_2",  name: "Signature 2", type: "signature",   x: 357, y: 212, width: 150, height: 25, signer: 1, page: 4, required: true },
-        { api_id: "date_2", name: "Date 2",      type: "date_signed", x: 500, y: 212, width: 52,  height: 25, signer: 1, page: 4, required: true }
+        { api_id: "sig_2",  name: "Signature 2", type: "signature",   x: 315, y: 198, width: 125, height: 20, signer: 1, page: 4, required: true },
+        { api_id: "date_2", name: "Date 2",      type: "date_signed", x: 444, y: 198, width: 100, height: 20, signer: 1, page: 4, required: true }
       );
     }
     form.append("form_fields_per_document", JSON.stringify([lorFields]));
