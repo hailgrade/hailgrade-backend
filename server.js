@@ -2849,10 +2849,25 @@ async function buildLorPdf(opts = {}) {
     T(page, c, W / 2 - cw / 2, fy - 28, 9);
   }
 
+  // Shrink a value's font so it always fits within its line, never overflowing.
+  function fitSize(value, lineStart, lineEnd, size, font) {
+    var s = String(value == null ? "" : value);
+    var maxW = (lineEnd - lineStart) - 5;
+    var fs = size;
+    try { while (fs > 6 && font.widthOfTextAtSize(s, fs) > maxW) fs -= 0.5; } catch (e) {}
+    return fs;
+  }
+  function fitText(page, value, lineStart, lineEnd, y, size, font) {
+    var s = String(value == null ? "" : value);
+    if (!s) return;
+    font = font || helv; size = size || 11;
+    var fs = fitSize(s, lineStart, lineEnd, size, font);
+    page.drawText(s, { x: lineStart + 3, y: y, size: fs, font: font, color: BLACK });
+  }
   function fillField(page, label, value, x, y, lineStart, lineEnd) {
     T(page, label, x, y);
     LINE(page, lineStart, y - 4, lineEnd);
-    if (value) T(page, String(value), lineStart + 3, y);
+    fitText(page, value, lineStart, lineEnd, y, 11, helv);
   }
   function cbox(page, label, selected, x, y) {
     T(page, selected ? "[X] " : "[  ] ", x, y, 11, bold);
@@ -2881,12 +2896,13 @@ async function buildLorPdf(opts = {}) {
   header(page);
   let y = H - 140;
 
-  fillField(page, "Insurance Company:", p.insurance_company, LEFT,        y, LEFT + 125, LEFT + 280);
-  fillField(page, "Policy #:",          p.policy_number,     LEFT + 300,  y, LEFT + 350, RIGHT);
-  y -= 32;
-  fillField(page, "Claim #:",           p.claim_number,      LEFT,        y, LEFT + 55,  LEFT + 225);
-  fillField(page, "Date of Loss:",      p.date_of_loss,      LEFT + 245,  y, LEFT + 325, RIGHT);
-  y -= 32;
+  // Insurance Company gets the full line width so long carrier names fit.
+  fillField(page, "Insurance Company:", p.insurance_company, LEFT, y, LEFT + 128, RIGHT);
+  y -= 30;
+  fillField(page, "Policy #:",     p.policy_number, LEFT,       y, LEFT + 50,  LEFT + 135);
+  fillField(page, "Claim #:",      p.claim_number,  LEFT + 145, y, LEFT + 192, LEFT + 285);
+  fillField(page, "Date of Loss:", p.date_of_loss,  LEFT + 295, y, LEFT + 367, RIGHT);
+  y -= 30;
 
   cbox(page, "Non-emergency",          p.claim_type === "non_emergency",          LEFT,       y);
   cbox(page, "Emergency Supplemental", p.claim_type === "emergency_supplemental", LEFT + 165, y);
@@ -2895,7 +2911,7 @@ async function buildLorPdf(opts = {}) {
 
   T(page, "The undersigned insured(s)", LEFT, y);
   LINE(page, LEFT + 170, y - 4, LEFT + 345);
-  if (p.insured_name) T(page, p.insured_name, LEFT + 173, y);
+  fitText(page, p.insured_name, LEFT + 170, LEFT + 345, y, 11, helv);
   T(page, "hereby retains Smith Adjusters to assist in the", LEFT + 352, y);
   y -= 22;
   T(page, "preparation, presentation, adjustment and negotiation of the claim for the loss which", LEFT, y);
@@ -2905,18 +2921,18 @@ async function buildLorPdf(opts = {}) {
   if (dol.day) T(page, dol.day, LEFT + 165, y);
   T(page, "day of", LEFT + 212, y);
   LINE(page, LEFT + 250, y - 4, RIGHT);
-  if (dol.monthYear) T(page, dol.monthYear, LEFT + 253, y);
+  fitText(page, dol.monthYear, LEFT + 250, RIGHT, y, 11, helv);
   y -= 22;
   T(page, "on the property located at", LEFT, y);
   LINE(page, LEFT + 155, y - 4, RIGHT);
-  if (p.property_address) T(page, p.property_address, LEFT + 158, y);
+  fitText(page, p.property_address, LEFT + 155, RIGHT, y, 11, helv);
   y -= 26;
 
   fillField(page, "Phone #:",         p.phone, LEFT,       y, LEFT + 55,  LEFT + 245);
   fillField(page, "Email:",           p.email, LEFT + 265, y, LEFT + 305, RIGHT);
   y -= 26;
-  fillField(page, "Caused by:",       p.caused_by,       LEFT,       y, LEFT + 65,  LEFT + 265);
-  fillField(page, "Probable Damage:", p.probable_damage, LEFT + 280, y, LEFT + 385, RIGHT);
+  fillField(page, "Caused by:",       p.caused_by,       LEFT,       y, LEFT + 62,  LEFT + 250);
+  fillField(page, "Probable Damage:", p.probable_damage, LEFT + 262, y, LEFT + 360, RIGHT);
   y -= 34;
 
   for (const ln of [
