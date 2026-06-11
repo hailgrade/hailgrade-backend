@@ -3132,6 +3132,22 @@ async function buildWidenedLor(srcBuf, opts = {}) {
   val(p4,p.insured_1_name,118,250,171.18,11);
   val(p4,p.insured_2_name,262,440,171.18,11);
 
+  // ---- optional: draw the signable boxes (for the blank setup preview) ----
+  if (opts.showSignBoxes) {
+    const boxFill = rgb(0.88, 0.93, 1), boxBorder = rgb(0.20, 0.45, 0.93), boxText = rgb(0.16, 0.36, 0.84);
+    const box = (pg, xt, yt, w, h, label) => {
+      pg.drawRectangle({ x: xt, y: H-(yt+h), width: w, height: h, color: boxFill, opacity: 0.55, borderColor: boxBorder, borderWidth: 1, borderOpacity: 1 });
+      if (label) pg.drawText(label, { x: xt + 4, y: H-(yt+h) + (h/2) - 3, size: 7, font: fb, color: boxText });
+    };
+    // Initials box at the bottom of every page
+    pgs.forEach((pg) => box(pg, 470, 739, 88, 18, "INITIAL"));
+    // Page 4: two insured signature + date lines
+    box(p4, 78, 197, 126, 21, "SIGN");
+    box(p4, 209, 197, 86, 21, "DATE");
+    box(p4, 314, 197, 126, 21, "SIGN");
+    box(p4, 443, 197, 100, 21, "DATE");
+  }
+
   return Buffer.from(await pdf.save());
 }
 
@@ -3247,9 +3263,10 @@ app.get("/contracts/lor-preview", requireAuth, async (req, res) => {
         fee_percent: "10", insured_1_name: "Sample Insured", insured_2_name: "",
       };
     }
+    const showSignBoxes = String(req.query && req.query.boxes || "") === "1";
     const { LOR_TEMPLATE_B64 } = await import("./lor-template-b64.js");
     const srcBuf = Buffer.from(LOR_TEMPLATE_B64, "base64");
-    const pdfBytes = await buildWidenedLor(srcBuf, { prefill });
+    const pdfBytes = await buildWidenedLor(srcBuf, { prefill, showSignBoxes });
     res.json({ ok: true, filename: "Letter of Representation.pdf", pdf_base64: Buffer.from(pdfBytes).toString("base64") });
   } catch (e) {
     console.error("[contracts/lor-preview]", e);
