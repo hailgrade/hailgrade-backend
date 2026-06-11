@@ -2910,11 +2910,13 @@ async function buildLorPdf(opts = {}) {
   y -= 32;
 
   T(page, "The undersigned insured(s)", LEFT, y);
-  LINE(page, LEFT + 170, y - 4, LEFT + 345);
-  fitText(page, p.insured_name, LEFT + 170, LEFT + 345, y, 11, helv);
-  T(page, "hereby retains Smith Adjusters to assist in the", LEFT + 352, y);
+  LINE(page, LEFT + 168, y - 4, LEFT + 300);
+  fitText(page, p.insured_name, LEFT + 168, LEFT + 300, y, 11, helv);
+  T(page, "hereby retains Smith", LEFT + 308, y);
   y -= 22;
-  T(page, "preparation, presentation, adjustment and negotiation of the claim for the loss which", LEFT, y);
+  T(page, "Adjusters to assist in the preparation, presentation, adjustment and negotiation of the", LEFT, y);
+  y -= 22;
+  T(page, "claim for the loss which", LEFT, y);
   y -= 22;
   T(page, "occurred on or about the", LEFT, y);
   LINE(page, LEFT + 150, y - 4, LEFT + 205);
