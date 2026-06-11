@@ -3222,6 +3222,40 @@ app.post("/contracts/send-lor", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Could not send LOR" });
   }
 });
+
+/* =================== GET /contracts/lor-preview ===================
+   Returns the user's exact LOR PDF, widened and filled, so the app can
+   show what auto-fill produces. Accepts optional prefill via query (JSON
+   in `prefill`); otherwise uses representative sample values so the
+   widened blanks are visibly filled. This is the same buildWidenedLor
+   used by the real send — the preview and the sent document match. */
+app.get("/contracts/lor-preview", requireAuth, async (req, res) => {
+  try {
+    let prefill = {};
+    if (req.query && req.query.prefill) {
+      try { prefill = JSON.parse(String(req.query.prefill)); } catch (e) { prefill = {}; }
+    }
+    const blank = String(req.query && req.query.blank || "") === "1";
+    if (!blank && (!prefill || !Object.keys(prefill).length)) {
+      prefill = {
+        insurance_company: "Heritage Property & Casualty Insurance Co.",
+        policy_number: "HOH359940", claim_number: "2026-0118-04",
+        date_of_loss: "12/08/2025", claim_type: "non_emergency",
+        insured_name: "Sample Insured", property_address: "123 Main St, Mount Dora, FL 32757",
+        phone: "(407) 555-0199", email: "insured@example.com",
+        caused_by: "Wind and hail", probable_damage: "Roof and interior",
+        fee_percent: "10", insured_1_name: "Sample Insured", insured_2_name: "",
+      };
+    }
+    const { LOR_TEMPLATE_B64 } = await import("./lor-template-b64.js");
+    const srcBuf = Buffer.from(LOR_TEMPLATE_B64, "base64");
+    const pdfBytes = await buildWidenedLor(srcBuf, { prefill });
+    res.json({ ok: true, filename: "Letter of Representation.pdf", pdf_base64: Buffer.from(pdfBytes).toString("base64") });
+  } catch (e) {
+    console.error("[contracts/lor-preview]", e);
+    res.status(500).json({ error: "Could not build the LOR preview" });
+  }
+});
 /* ================= END LOR FROM SCRATCH ================= */
 
 
