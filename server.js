@@ -3194,22 +3194,55 @@ app.post("/contracts/send-lor", requireAuth, async (req, res) => {
     }
     form.append("cc_email_addresses[0]", req.user.email);
     form.append("test_mode",      "1");
-    // Explicit widget placement (top-left origin, PDF points). Coordinates
-    // measured from the user's real LOR: initials line at the bottom of every
-    // page, and the two signature/date lines + PA line on page 4.
-    const lorFields = [
-      { api_id: "init_p1", name: "Initial p1", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 1, required: true },
-      { api_id: "init_p2", name: "Initial p2", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 2, required: true },
-      { api_id: "init_p3", name: "Initial p3", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 3, required: true },
-      { api_id: "init_p4", name: "Initial p4", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 4, required: true },
-      { api_id: "sig_1",   name: "Signature",  type: "signature",   x: 78,  y: 198, width: 125, height: 20, signer: 0, page: 4, required: true },
-      { api_id: "date_1",  name: "Date",       type: "date_signed", x: 210, y: 198, width: 85,  height: 20, signer: 0, page: 4, required: true },
-    ];
-    if (useSigner2) {
-      lorFields.push(
-        { api_id: "sig_2",  name: "Signature 2", type: "signature",   x: 315, y: 198, width: 125, height: 20, signer: 1, page: 4, required: true },
-        { api_id: "date_2", name: "Date 2",      type: "date_signed", x: 444, y: 198, width: 100, height: 20, signer: 1, page: 4, required: true }
-      );
+    // Box-driven signing: if the LOR template has a saved auto-fill layout, place the
+    // signature / initials / date e-sign boxes exactly where the user put them in
+    // "Set up auto-fill". Otherwise fall back to the measured default positions.
+    let lorFields = null;
+    try {
+      const tplRows = dsRowsOf(await q(
+        "SELECT field_map FROM user_contracts WHERE user_id=$1 AND (name ILIKE '%lor%' OR name ILIKE '%letter of representation%' OR filename ILIKE '%lor%' OR filename ILIKE '%letter of representation%') ORDER BY id DESC LIMIT 1",
+        [req.user.id]));
+      let fm = [];
+      if (tplRows.length && tplRows[0].field_map) {
+        const p = JSON.parse(String(tplRows[0].field_map));
+        fm = Array.isArray(p) ? p : (p.fields || []);
+      }
+      const W = 612, H = 792;
+      const norm = (f) => f && f.nx != null && f.ny != null;
+      const SIGN = { signature: 1, date_signed: 1, initials: 1 };
+      const signBoxes = fm.filter((f) => norm(f) && SIGN[String((f.type || f.id || "")).toLowerCase()]);
+      if (signBoxes.length) {
+        let seq = 0; const nid = () => "fld_" + (++seq);
+        lorFields = signBoxes.map((f) => {
+          const t = String(f.type || f.id).toLowerCase();
+          const who = String(f.signer || "client").toLowerCase();
+          const signer = (who === "client2" && useSigner2) ? 1 : 0;
+          return {
+            api_id: nid(), name: t, type: t, page: f.page || 1,
+            x: Math.round((+f.nx || 0) * W), y: Math.round((+f.ny || 0) * H),
+            width: Math.max(24, Math.round((+f.nw || 0.12) * W)),
+            height: Math.max(14, Math.round((+f.nh || 0.03) * H)),
+            required: true, signer,
+          };
+        });
+      }
+    } catch (e) { console.error("[contracts/send-lor] field_map load failed", e); }
+    if (!lorFields) {
+      // Default measured positions on the widened LOR (top-left origin, PDF points).
+      lorFields = [
+        { api_id: "init_p1", name: "Initial p1", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 1, required: true },
+        { api_id: "init_p2", name: "Initial p2", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 2, required: true },
+        { api_id: "init_p3", name: "Initial p3", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 3, required: true },
+        { api_id: "init_p4", name: "Initial p4", type: "initials",    x: 472, y: 740, width: 85,  height: 17, signer: 0, page: 4, required: true },
+        { api_id: "sig_1",   name: "Signature",  type: "signature",   x: 78,  y: 198, width: 125, height: 20, signer: 0, page: 4, required: true },
+        { api_id: "date_1",  name: "Date",       type: "date_signed", x: 210, y: 198, width: 85,  height: 20, signer: 0, page: 4, required: true },
+      ];
+      if (useSigner2) {
+        lorFields.push(
+          { api_id: "sig_2",  name: "Signature 2", type: "signature",   x: 315, y: 198, width: 125, height: 20, signer: 1, page: 4, required: true },
+          { api_id: "date_2", name: "Date 2",      type: "date_signed", x: 444, y: 198, width: 100, height: 20, signer: 1, page: 4, required: true }
+        );
+      }
     }
     form.append("form_fields_per_document", JSON.stringify([lorFields]));
     form.append("file[0]", new Blob([pdfBytes], { type: "application/pdf" }), "LOR.pdf");
