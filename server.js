@@ -4449,6 +4449,32 @@ app.delete('/calendar/events/:id', requireAuth, async (req, res) => {
   } catch (e) { console.error('[partners schema]', e && e.message); }
 })();
 
+// Assign one of my leads to a linked partner (PA <-> roofer) so it appears in their account too.
+// Sets the partner as creator and the caller as assignee — same shape as a partner referral, so
+// the lead is visible in BOTH accounts (creator OR assignee can see it).
+app.post('/leads/:id/assign-partner', requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'bad_id' });
+  const partnerId = parseInt((req.body && req.body.partner_user_id) || 0);
+  if (!partnerId) return res.status(400).json({ error: 'partner_user_id_required' });
+  if (partnerId === req.user.id) return res.status(400).json({ error: 'cannot_assign_self' });
+  try {
+    const lead = await one('SELECT * FROM leads WHERE id = $1', [id]);
+    if (!lead) return res.status(404).json({ error: 'not_found' });
+    const isOwner = req.user.org_id && req.user.org_role === 'owner';
+    const sameOrg = lead.org_id && lead.org_id === req.user.org_id;
+    const isMine = lead.created_by === req.user.id || lead.assigned_to === req.user.id;
+    if (!isMine && !(isOwner && sameOrg)) return res.status(403).json({ error: 'forbidden' });
+    const link = await one('SELECT id FROM partner_links WHERE (pa_user_id = $1 AND roofer_user_id = $2) OR (roofer_user_id = $1 AND pa_user_id = $2) LIMIT 1', [req.user.id, partnerId]);
+    if (!link) return res.status(403).json({ error: 'not_linked' });
+    const updated = await one('UPDATE leads SET created_by = $1, assigned_to = $2, assigned_by = $2, assigned_at = now(), updated_at = now() WHERE id = $3 RETURNING *', [partnerId, req.user.id, id]);
+    res.json({ ok: true, lead: updated });
+  } catch (err) {
+    console.error('[leads assign-partner]', err);
+    res.status(500).json({ error: 'assign_failed', detail: err.message });
+  }
+});
+
 function _generatePartnerCode() {
   // 6 chars, uppercase, no confusing 0/O/1/I/L
   const alpha = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
