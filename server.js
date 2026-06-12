@@ -1084,7 +1084,8 @@ app.get('/leads', requireAuth, async (req, res) => {
         else if (a && a !== 'all') { wh.push('l.assigned_to = ' + ('$' + (pn++))); params.push(parseInt(a)); }
       }
     } else {
-      wh.push('l.created_by = ' + ('$' + (pn++)));
+      const meId = pn++;
+      wh.push('(l.created_by = $' + meId + ' OR l.assigned_to = $' + meId + ')');
       params.push(req.user.id);
     }
     if (req.query.status) { wh.push('l.status = ' + ('$' + (pn++))); params.push(req.query.status); }
