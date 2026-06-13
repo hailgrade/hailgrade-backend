@@ -1649,6 +1649,61 @@ app.post('/supplements/analyze', requireAuth, requireActiveSubscription, async (
 // Requires: ANTHROPIC_API_KEY env var (already set in Render for /analyze).
 // ============================================================
 
+// POST /estimate/extract — pull money figures off a carrier estimate / payment doc via Claude vision
+app.post('/estimate/extract', requireAuth, async (req, res) => {
+  try {
+    const { image_base64, media_type, pdf_base64, filename } = req.body || {};
+    if (!image_base64 && !pdf_base64) return res.status(400).json({ error: 'missing_input', message: 'image_base64 or pdf_base64 required' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'no_api_key' });
+    const content = [];
+    if (pdf_base64) {
+      content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf_base64 } });
+    } else {
+      content.push({ type: 'image', source: { type: 'base64', media_type: media_type || 'image/jpeg', data: image_base64 } });
+    }
+    const prompt =
+`You are reading an insurance-claim money document. It is usually a CARRIER ESTIMATE, an adjuster's estimate, a payment/settlement letter, a supplement, or a contractor estimate for property damage (roof, water, fire, etc.).
+
+Return ONLY a JSON object with these keys (use null when a value is not clearly shown):
+{
+  "document_type": "one of: carrier_estimate, adjuster_estimate, contractor_estimate, payment_letter, supplement, other",
+  "carrier": "insurance company name if shown, else null",
+  "claim_number": "claim number if shown, else null",
+  "date": "document date as YYYY-MM-DD if shown, else null",
+  "rcv": "Replacement Cost Value total, number only no symbols",
+  "acv": "Actual Cash Value total, number only",
+  "depreciation": "recoverable depreciation amount, number only",
+  "non_recoverable_depreciation": "non-recoverable depreciation, number only",
+  "deductible": "deductible amount, number only",
+  "net_claim": "net amount payable / net claim if shown (often ACV minus deductible), number only",
+  "amount": "the single most important headline dollar figure on the document, number only",
+  "summary": "one short sentence describing what this document is and its key number"
+}
+
+Rules:
+- All money values must be numeric strings, no symbols ("12345.67" not "$12,345.67"). Use null if not visible.
+- "amount" is your best single pick for the headline figure: prefer the grand total / RCV for an estimate, or the payment amount for a payment letter.
+- Do not invent values. Output ONLY the JSON object, no markdown, no commentary, no code fences.`;
+    content.push({ type: 'text', text: prompt });
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'pdfs-2024-09-25', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1500, messages: [{ role: 'user', content }] })
+    });
+    if (!resp.ok) { const errTxt = await resp.text(); return res.status(500).json({ error: 'anthropic_error', message: errTxt.slice(0, 300) }); }
+    const data = await resp.json();
+    let cleaned = ((data.content && data.content[0] && data.content[0].text) || '').trim();
+    if (cleaned.startsWith('```')) { cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim(); }
+    let fields = null;
+    try { fields = JSON.parse(cleaned); } catch (e) { const mm = cleaned.match(/\{[\s\S]*\}/); if (mm) { try { fields = JSON.parse(mm[0]); } catch (e2) {} } }
+    if (!fields || typeof fields !== 'object') return res.status(500).json({ error: 'parse_failed', raw: cleaned.slice(0, 400) });
+    return res.json({ fields });
+  } catch (err) {
+    console.error('estimate/extract error', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
 app.post('/policy/extract', requireAuth, async (req, res) => {
   try {
     const { image_base64, media_type, pdf_base64, filename, claim_local_id } = req.body || {};
