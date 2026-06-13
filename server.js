@@ -853,6 +853,7 @@ app.get('/emails/:msgId', requireAuth, async (req, res) => {
       body_html: parts.html || '',
       attachments: parts.attachments || [],
       labels: m.labelIds || [],
+      message_id_header: _headerVal(headers, 'Message-ID') || _headerVal(headers, 'Message-Id'),
       snippet: m.snippet || ''
     });
   } catch (err) {
@@ -879,6 +880,56 @@ app.get('/emails/:msgId/attachment/:attId', requireAuth, async (req, res) => {
     return res.json({ data_base64: b64, size: a.size || 0 });
   } catch (err) {
     console.error('[/emails/attachment]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
+// POST /emails/send — send a new email or reply via Gmail API (needs gmail.send scope)
+app.post('/emails/send', requireAuth, async (req, res) => {
+  try {
+    const accessToken = await _ampleGoogleToken(req.user.id);
+    if (!accessToken) return res.status(401).json({ error: 'not_connected' });
+    const b = req.body || {};
+    const to = String(b.to || '').trim();
+    if (!to) return res.status(400).json({ error: 'no_recipient' });
+    const subject = String(b.subject || '').trim();
+    const bodyText = String(b.body || '');
+    const threadId = b.threadId ? String(b.threadId) : null;
+    const inReplyTo = b.inReplyTo ? String(b.inReplyTo).trim() : '';
+    const CRLF = String.fromCharCode(13, 10);
+    const needsEnc = Buffer.byteLength(subject, 'utf8') !== subject.length;
+    const encSubject = needsEnc ? ('=?UTF-8?B?' + Buffer.from(subject, 'utf8').toString('base64') + '?=') : subject;
+    const headerLines = [];
+    headerLines.push('To: ' + to);
+    if (b.cc) headerLines.push('Cc: ' + String(b.cc).trim());
+    headerLines.push('Subject: ' + encSubject);
+    if (inReplyTo) {
+      headerLines.push('In-Reply-To: ' + inReplyTo);
+      headerLines.push('References: ' + inReplyTo);
+    }
+    headerLines.push('MIME-Version: 1.0');
+    headerLines.push('Content-Type: text/plain; charset="UTF-8"');
+    headerLines.push('Content-Transfer-Encoding: 8bit');
+    const rfc822 = headerLines.join(CRLF) + CRLF + CRLF + bodyText;
+    let raw = Buffer.from(rfc822, 'utf8').toString('base64').split('+').join('-').split('/').join('_');
+    while (raw.endsWith('=')) raw = raw.slice(0, -1);
+    const payload = { raw: raw };
+    if (threadId) payload.threadId = threadId;
+    const sendResp = await fetch(
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+      { method: 'POST', headers: { authorization: 'Bearer ' + accessToken, 'content-type': 'application/json' }, body: JSON.stringify(payload) }
+    );
+    if (!sendResp.ok) {
+      const errTxt = await sendResp.text().catch(() => '');
+      if (sendResp.status === 403 || /insufficient/i.test(errTxt) || /scope/i.test(errTxt)) {
+        return res.status(403).json({ error: 'needs_reconnect', message: 'Reconnect Google to grant send permission.' });
+      }
+      return res.status(sendResp.status).json({ error: 'gmail_send_http_' + sendResp.status, message: errTxt.slice(0, 300) });
+    }
+    const sent = await sendResp.json();
+    return res.json({ ok: true, id: sent.id, thread_id: sent.threadId });
+  } catch (err) {
+    console.error('[/emails/send]', err);
     return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
   }
 });
@@ -4163,6 +4214,7 @@ const GOOGLE_OAUTH_SCOPES = [
   'email',
   'profile',
   'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/calendar',
 ];
 const GOOGLE_OAUTH_FRONTEND_RETURN = (process.env.GOOGLE_OAUTH_FRONTEND_RETURN ||
