@@ -4510,6 +4510,60 @@ app.post('/leads/:id/assign-partner', requireAuth, async (req, res) => {
   }
 });
 
+// ============ Client status share links ============
+// A PA shares a read-only claim status page with their client. The app pushes a snapshot
+// (current phase + a personal message); the public page reads it by token (no auth).
+(async () => {
+  try {
+    await pool.query("CREATE TABLE IF NOT EXISTS client_status (id SERIAL PRIMARY KEY, token TEXT UNIQUE NOT NULL, pa_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, claim_local_id TEXT NOT NULL, client_name TEXT, property TEXT, phase_id TEXT, phase_label TEXT, phase_index INTEGER, phases JSONB, message TEXT, firm_name TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(pa_user_id, claim_local_id))");
+    console.log('[client_status] schema ready');
+  } catch (e) { console.error('[client_status schema]', e && e.message); }
+})();
+
+function _clientStatusToken() {
+  const a = 'abcdefghjkmnpqrstuvwxyz23456789';
+  let s = '';
+  for (let i = 0; i < 22; i++) s += a[Math.floor(Math.random() * a.length)];
+  return s;
+}
+
+app.post('/client-status', requireAuth, async (req, res) => {
+  const b = req.body || {};
+  const claimId = (b.claim_local_id || '').toString().trim();
+  if (!claimId) return res.status(400).json({ error: 'claim_local_id_required' });
+  const phases = Array.isArray(b.phases) ? b.phases.slice(0, 40) : null;
+  const phaseIdx = (b.phase_index != null && b.phase_index !== "") ? parseInt(b.phase_index) : null;
+  try {
+    const existing = await one('SELECT token FROM client_status WHERE pa_user_id = $1 AND claim_local_id = $2', [req.user.id, claimId]);
+    let token = existing && existing.token;
+    if (token) {
+      await q("UPDATE client_status SET client_name=$1, property=$2, phase_id=$3, phase_label=$4, phase_index=$5, phases=$6, message=$7, firm_name=$8, updated_at=now() WHERE token=$9",
+        [b.client_name||null, b.property||null, b.phase_id||null, b.phase_label||null, phaseIdx, phases?JSON.stringify(phases):null, b.message||null, b.firm_name||null, token]);
+    } else {
+      token = _clientStatusToken();
+      await q("INSERT INTO client_status (token, pa_user_id, claim_local_id, client_name, property, phase_id, phase_label, phase_index, phases, message, firm_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+        [token, req.user.id, claimId, b.client_name||null, b.property||null, b.phase_id||null, b.phase_label||null, phaseIdx, phases?JSON.stringify(phases):null, b.message||null, b.firm_name||null]);
+    }
+    res.json({ ok: true, token: token, url: 'https://ampleclaim.com/status?t=' + token });
+  } catch (err) {
+    console.error('[client-status POST]', err);
+    res.status(500).json({ error: 'save_failed', detail: err.message });
+  }
+});
+
+app.get('/client-status/:token', async (req, res) => {
+  const token = (req.params.token || '').toString();
+  if (!token) return res.status(400).json({ error: 'bad_token' });
+  try {
+    const row = await one('SELECT client_name, property, phase_id, phase_label, phase_index, phases, message, firm_name, updated_at FROM client_status WHERE token = $1', [token]);
+    if (!row) return res.status(404).json({ error: 'not_found' });
+    res.json({ ok: true, status: row });
+  } catch (err) {
+    console.error('[client-status GET]', err);
+    res.status(500).json({ error: 'load_failed', detail: err.message });
+  }
+});
+
 function _generatePartnerCode() {
   // 6 chars, uppercase, no confusing 0/O/1/I/L
   const alpha = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
