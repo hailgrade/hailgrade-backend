@@ -989,6 +989,41 @@ ${body}
 
 
 app.post('/events', requireAuth, async (req, res) => {
+  // Google Calendar sync: if the user has Google connected, create the event on Google
+  // (it then syncs back into the app on the next read) so it shows on their Google Calendar.
+  // No local row is written here, which avoids a duplicate when the sync re-imports it.
+  try {
+    const _gb = req.body || {};
+    const _gt = ((_gb.title || '') + '').trim();
+    if (_gt && _gb.starts_at) {
+      const _gtok = await _ampleGoogleToken(req.user.id);
+      if (_gtok) {
+        const _ev = { summary: _gt };
+        if (_gb.description) _ev.description = _gb.description;
+        if (_gb.location) _ev.location = _gb.location;
+        if (_gb.all_day) {
+          const _sd = String(_gb.starts_at).slice(0, 10);
+          const _ed0 = _gb.ends_at ? String(_gb.ends_at).slice(0, 10) : _sd;
+          const _nd = new Date(_ed0 + 'T00:00:00Z'); _nd.setUTCDate(_nd.getUTCDate() + 1);
+          _ev.start = { date: _sd };
+          _ev.end = { date: _nd.toISOString().slice(0, 10) };
+        } else {
+          _ev.start = { dateTime: _gb.starts_at };
+          _ev.end = { dateTime: _gb.ends_at || new Date(new Date(_gb.starts_at).getTime() + 3600000).toISOString() };
+        }
+        const _gr = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + _gtok, 'Content-Type': 'application/json' },
+          body: JSON.stringify(_ev)
+        });
+        if (_gr.ok) {
+          const _gev = await _gr.json();
+          return res.json({ ok: true, source: 'google', event: { id: 'gcal_' + _gev.id, title: _gt, starts_at: _gb.starts_at, ends_at: _gb.ends_at || null, all_day: !!_gb.all_day, location: _gb.location || null, claim_local_id: _gb.claim_local_id || null } });
+        }
+        try { console.error('[events->google] create failed', _gr.status, (await _gr.text()).slice(0,160)); } catch(_e){}
+      }
+    }
+  } catch (_ge) { console.error('[events->google]', _ge && _ge.message); }
   try {
     const b = req.body || {};
     const title = ((b.title || '') + '').trim();
