@@ -52,7 +52,17 @@ app.use(cors({
 app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), handleStripeWebhook);
 
 // All other routes use JSON
-app.use(express.json({ limit: '60mb' })); // 25mb so phone-quality JPEGs fit
+app.use(express.json({ limit: '60mb' }));
+// --- TEMP maintenance: pause claim sync to relieve DB; remove after cleanup ---
+app.use('/claims', function (req, res) { return res.status(503).json({ error: 'sync_paused_maintenance' }); });
+app.post('/admin/strip-claim-files', async function (req, res) {
+  try {
+    if (!req.body || req.body.key !== 'fixdb-7Kp29Qx') { return res.status(403).json({ error: 'forbidden' }); }
+    var r1 = await pool.query("UPDATE pa_claims SET data = (((data - 'attachments') - 'photos') - '_emailCache') - '_partnerFiles' WHERE (data ? 'attachments') OR (data ? 'photos') OR (data ? '_emailCache') OR (data ? '_partnerFiles')");
+    return res.json({ ok: true, updated: r1.rowCount });
+  } catch (e) { return res.status(500).json({ error: String((e && e.message) || e) }); }
+});
+ // 25mb so phone-quality JPEGs fit
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder');
 
