@@ -884,7 +884,7 @@ app.get('/emails/:msgId/attachment/:attId', requireAuth, async (req, res) => {
   }
 });
 
-// POST /emails/send — send a new email or reply via Gmail API (needs gmail.send scope)
+// POST /emails/send — send a new email/reply via Gmail API (needs gmail.send scope). Supports one optional attachment.
 app.post('/emails/send', requireAuth, async (req, res) => {
   try {
     const accessToken = await _ampleGoogleToken(req.user.id);
@@ -899,18 +899,47 @@ app.post('/emails/send', requireAuth, async (req, res) => {
     const CRLF = String.fromCharCode(13, 10);
     const needsEnc = Buffer.byteLength(subject, 'utf8') !== subject.length;
     const encSubject = needsEnc ? ('=?UTF-8?B?' + Buffer.from(subject, 'utf8').toString('base64') + '?=') : subject;
-    const headerLines = [];
-    headerLines.push('To: ' + to);
-    if (b.cc) headerLines.push('Cc: ' + String(b.cc).trim());
-    headerLines.push('Subject: ' + encSubject);
-    if (inReplyTo) {
-      headerLines.push('In-Reply-To: ' + inReplyTo);
-      headerLines.push('References: ' + inReplyTo);
+
+    const hasAtt = !!(b.attachment_base64 && b.attachment_name);
+    let rfc822;
+    if (hasAtt) {
+      const attName = String(b.attachment_name);
+      const attMime = String(b.attachment_mime || 'application/octet-stream');
+      const attData = String(b.attachment_base64).replace(/\s/g, '');
+      const wrapped = attData.replace(/.{76}/g, function (m) { return m + CRLF; });
+      const boundary = 'ample_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      const head = [];
+      head.push('To: ' + to);
+      if (b.cc) head.push('Cc: ' + String(b.cc).trim());
+      head.push('Subject: ' + encSubject);
+      if (inReplyTo) { head.push('In-Reply-To: ' + inReplyTo); head.push('References: ' + inReplyTo); }
+      head.push('MIME-Version: 1.0');
+      head.push('Content-Type: multipart/mixed; boundary="' + boundary + '"');
+      const parts = [];
+      parts.push('--' + boundary);
+      parts.push('Content-Type: text/plain; charset="UTF-8"');
+      parts.push('Content-Transfer-Encoding: 8bit');
+      parts.push('');
+      parts.push(bodyText);
+      parts.push('--' + boundary);
+      parts.push('Content-Type: ' + attMime + '; name="' + attName + '"');
+      parts.push('Content-Transfer-Encoding: base64');
+      parts.push('Content-Disposition: attachment; filename="' + attName + '"');
+      parts.push('');
+      parts.push(wrapped);
+      parts.push('--' + boundary + '--');
+      rfc822 = head.join(CRLF) + CRLF + CRLF + parts.join(CRLF);
+    } else {
+      const headerLines = [];
+      headerLines.push('To: ' + to);
+      if (b.cc) headerLines.push('Cc: ' + String(b.cc).trim());
+      headerLines.push('Subject: ' + encSubject);
+      if (inReplyTo) { headerLines.push('In-Reply-To: ' + inReplyTo); headerLines.push('References: ' + inReplyTo); }
+      headerLines.push('MIME-Version: 1.0');
+      headerLines.push('Content-Type: text/plain; charset="UTF-8"');
+      headerLines.push('Content-Transfer-Encoding: 8bit');
+      rfc822 = headerLines.join(CRLF) + CRLF + CRLF + bodyText;
     }
-    headerLines.push('MIME-Version: 1.0');
-    headerLines.push('Content-Type: text/plain; charset="UTF-8"');
-    headerLines.push('Content-Transfer-Encoding: 8bit');
-    const rfc822 = headerLines.join(CRLF) + CRLF + CRLF + bodyText;
     let raw = Buffer.from(rfc822, 'utf8').toString('base64').split('+').join('-').split('/').join('_');
     while (raw.endsWith('=')) raw = raw.slice(0, -1);
     const payload = { raw: raw };
