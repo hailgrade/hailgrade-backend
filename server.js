@@ -1733,6 +1733,56 @@ Rules:
   }
 });
 
+// ===== Cloud claim sync — full claim JSON (incl. embedded files) per user, last-write-wins =====
+let _claimsTableReady = false;
+async function _ensureClaimsTable() {
+  if (_claimsTableReady) return;
+  await pool.query('CREATE TABLE IF NOT EXISTS pa_claims (pa_user_id INTEGER NOT NULL, claim_local_id TEXT NOT NULL, data JSONB NOT NULL, updated_at BIGINT NOT NULL DEFAULT 0, server_updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (pa_user_id, claim_local_id))');
+  _claimsTableReady = true;
+}
+app.get('/claims', requireAuth, async (req, res) => {
+  try {
+    await _ensureClaimsTable();
+    const r = await pool.query('SELECT claim_local_id, data, updated_at FROM pa_claims WHERE pa_user_id = $1', [req.user.id]);
+    const claims = (r.rows || []).map(function (row) { return { id: row.claim_local_id, updated_at: Number(row.updated_at) || 0, data: row.data }; });
+    return res.json({ claims: claims });
+  } catch (err) {
+    console.error('[/claims GET]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+app.put('/claims/:localId', requireAuth, async (req, res) => {
+  try {
+    await _ensureClaimsTable();
+    const localId = String(req.params.localId || '').slice(0, 200);
+    if (!localId) return res.status(400).json({ error: 'bad_id' });
+    const b = req.body || {};
+    const data = b.data;
+    const updatedAt = Number(b.updated_at) || Date.now();
+    if (data == null || typeof data !== 'object') return res.status(400).json({ error: 'no_data' });
+    await pool.query(
+      'INSERT INTO pa_claims (pa_user_id, claim_local_id, data, updated_at, server_updated_at) VALUES ($1, $2, $3, $4, now()) ON CONFLICT (pa_user_id, claim_local_id) DO UPDATE SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at, server_updated_at = now() WHERE EXCLUDED.updated_at >= pa_claims.updated_at',
+      [req.user.id, localId, JSON.stringify(data), updatedAt]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[/claims PUT]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+app.delete('/claims/:localId', requireAuth, async (req, res) => {
+  try {
+    await _ensureClaimsTable();
+    const localId = String(req.params.localId || '').slice(0, 200);
+    if (!localId) return res.status(400).json({ error: 'bad_id' });
+    await pool.query('DELETE FROM pa_claims WHERE pa_user_id = $1 AND claim_local_id = $2', [req.user.id, localId]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[/claims DELETE]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
 app.post('/policy/extract', requireAuth, async (req, res) => {
   try {
     const { image_base64, media_type, pdf_base64, filename, claim_local_id } = req.body || {};
