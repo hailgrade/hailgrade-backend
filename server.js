@@ -52,16 +52,7 @@ app.use(cors({
 app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), handleStripeWebhook);
 
 // All other routes use JSON
-app.use(express.json({ limit: '60mb' }));
-// --- Slim claim sync: strip files server-side so the DB never stores attachments ---
-app.use('/claims', function (req, res, next) {
-  try {
-    function strip(o){ if (o && typeof o === 'object') { delete o.attachments; delete o.photos; delete o._emailCache; delete o._partnerFiles; } }
-    if (req.body && typeof req.body === 'object') { strip(req.body); strip(req.body.data); }
-  } catch (e) {}
-  next();
-});
- // 25mb so phone-quality JPEGs fit
+app.use(express.json({ limit: '60mb' })); // 25mb so phone-quality JPEGs fit
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder');
 
