@@ -34,6 +34,8 @@ const ALLOWED_ORIGINS = [
   'https://www.hailgrade.com',
   'https://ampleclaim.com',
   'https://www.ampleclaim.com',
+  'https://ampleroofer.com',
+  'https://www.ampleroofer.com',
   'https://helpful-gecko-1923b8.netlify.app',
   'http://localhost:5173',
   'http://localhost:8080'
