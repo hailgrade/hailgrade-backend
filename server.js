@@ -4346,6 +4346,7 @@ const GOOGLE_OAUTH_CLIENT_SECRET = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || ''
 const GOOGLE_OAUTH_REDIRECT_URI = (process.env.GOOGLE_OAUTH_REDIRECT_URI ||
   'https://hailgrade-backend.onrender.com/auth/google/callback').trim();
 const GOOGLE_OAUTH_SCOPES = [
+  "https://www.googleapis.com/auth/drive.file",
   'openid',
   'email',
   'profile',
@@ -4510,6 +4511,17 @@ app.get('/me/google', requireAuth, async (req, res) => {
     connected: !!r.rows[0].connected,
     email: r.rows[0].google_email || null
   });
+});
+
+// Returns a fresh Google access token so the browser can talk to Drive + Picker directly.
+app.get("/me/google/drive-token", requireAuth, async (req, res) => {
+  try {
+    const tok = await _ampleGoogleToken(req.user.id);
+    if (!tok) return res.status(400).json({ error: "not_connected" });
+    return res.json({ access_token: tok });
+  } catch (e) {
+    return res.status(500).json({ error: "server_error", message: (e && e.message) || "unknown" });
+  }
 });
 
 // Disconnect — clears all Google tokens for the user.
@@ -5237,3 +5249,8 @@ app.get("/partners/sent-statuses", requireAuth, async (req, res) => {
 }
 
 boot();
+
+ Claude is active in this tab group  
+Open chat
+ 
+Dismiss
