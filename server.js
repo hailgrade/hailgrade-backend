@@ -1,13 +1,13 @@
-// HailGrade backend — single-file Express app.
+// HailGrade backend â single-file Express app.
 // Endpoints:
-//   POST   /auth/signup     — create user
-//   POST   /auth/login      — get JWT
-//   GET    /me              — current user info
-//   POST   /analyze         — proxy a roof photo to Claude, log usage
-//   POST   /billing/checkout — create Stripe Checkout session
-//   POST   /billing/portal   — open Stripe billing portal
-//   POST   /webhooks/stripe  — Stripe webhook receiver
-//   GET    /health          — liveness probe for Render
+//   POST   /auth/signup     â create user
+//   POST   /auth/login      â get JWT
+//   GET    /me              â current user info
+//   POST   /analyze         â proxy a roof photo to Claude, log usage
+//   POST   /billing/checkout â create Stripe Checkout session
+//   POST   /billing/portal   â open Stripe billing portal
+//   POST   /webhooks/stripe  â Stripe webhook receiver
+//   GET    /health          â liveness probe for Render
 
 import 'dotenv/config';
 import express from 'express';
@@ -17,7 +17,7 @@ import { pool, q, one, ensureSchema } from './db.js';
 import { hashPassword, checkPassword, signToken, requireAuth, requireActiveSubscription } from './auth.js';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
-// Trim whitespace from every env var on boot — Render's UI can leave hidden newlines
+// Trim whitespace from every env var on boot â Render's UI can leave hidden newlines
 // in pasted secrets, which breaks Stripe webhook signature verification etc.
 for (const k of Object.keys(process.env)) {
   if (typeof process.env[k] === 'string') {
@@ -28,7 +28,7 @@ for (const k of Object.keys(process.env)) {
 const app = express();
 const port = process.env.PORT || 3000;
 
-// CORS — allow the HailGrade frontend (hailgrade.com) and local dev.
+// CORS â allow the HailGrade frontend (hailgrade.com) and local dev.
 const ALLOWED_ORIGINS = [
   'https://hailgrade.com',
   'https://www.hailgrade.com',
@@ -113,7 +113,7 @@ app.post('/auth/login', async (req, res) => {
   }
 });
 
-// Founder emails — auto-promoted to admin on any authenticated request.
+// Founder emails â auto-promoted to admin on any authenticated request.
 // Add additional admin emails here if you bring on a co-founder or support staff.
 const ADMIN_EMAILS = new Set(['adjustingsmith@gmail.com', 'claims@smithadjusters.com']);
 
@@ -147,9 +147,9 @@ function requireAdmin(req, res, next) {
   const provided = req.headers['x-admin-password'];
   const expected = process.env.ADMIN_PASSWORD;
   if (!expected) {
-    // No password configured on the server — soft-fail open with a warning header so
+    // No password configured on the server â soft-fail open with a warning header so
     // admin can still set things up the first time (the env var is the lock, missing == no lock).
-    res.setHeader('X-Admin-Warning', 'ADMIN_PASSWORD not set on server — anyone with admin role can use this');
+    res.setHeader('X-Admin-Warning', 'ADMIN_PASSWORD not set on server â anyone with admin role can use this');
     return next();
   }
   if (provided !== expected) {
@@ -323,7 +323,7 @@ async function templateOwnerIdFor(user) {
   return user.id;
 }
 
-// GET /org — current user's org state. Owners also get members (with stats) + invites.
+// GET /org â current user's org state. Owners also get members (with stats) + invites.
 app.get('/org', requireAuth, async (req, res) => {
   try {
     const ctx = await loadOrgContext(req.user.id);
@@ -358,7 +358,7 @@ app.get('/org', requireAuth, async (req, res) => {
   }
 });
 
-// POST /org/create — caller becomes the owner of a new org.
+// POST /org/create â caller becomes the owner of a new org.
 app.post('/org/create', requireAuth, async (req, res) => {
   try {
     const name = ((req.body && req.body.name) || '').trim();
@@ -377,7 +377,7 @@ app.post('/org/create', requireAuth, async (req, res) => {
   }
 });
 
-// POST /org/invite — owner generates a join code.
+// POST /org/invite â owner generates a join code.
 app.post('/org/invite', requireAuth, async (req, res) => {
   try {
     const ctx = await loadOrgContext(req.user.id);
@@ -401,7 +401,7 @@ app.post('/org/invite', requireAuth, async (req, res) => {
   }
 });
 
-// POST /org/invite/:id/revoke — owner revokes a code.
+// POST /org/invite/:id/revoke â owner revokes a code.
 app.post('/org/invite/:id/revoke', requireAuth, async (req, res) => {
   try {
     const ctx = await loadOrgContext(req.user.id);
@@ -416,7 +416,7 @@ app.post('/org/invite/:id/revoke', requireAuth, async (req, res) => {
   }
 });
 
-// POST /org/join — member joins via invite code.
+// POST /org/join â member joins via invite code.
 app.post('/org/join', requireAuth, async (req, res) => {
   try {
     const raw = (((req.body && req.body.code) || '').trim()).toUpperCase();
@@ -438,7 +438,7 @@ app.post('/org/join', requireAuth, async (req, res) => {
   }
 });
 
-// POST /org/member/:id/deactivate — owner disables a member account.
+// POST /org/member/:id/deactivate â owner disables a member account.
 app.post('/org/member/:id/deactivate', requireAuth, async (req, res) => {
   try {
     const ctx = await loadOrgContext(req.user.id);
@@ -456,7 +456,7 @@ app.post('/org/member/:id/deactivate', requireAuth, async (req, res) => {
   }
 });
 
-// POST /org/member/:id/reactivate — owner re-enables a member account.
+// POST /org/member/:id/reactivate â owner re-enables a member account.
 app.post('/org/member/:id/reactivate', requireAuth, async (req, res) => {
   try {
     const ctx = await loadOrgContext(req.user.id);
@@ -473,7 +473,7 @@ app.post('/org/member/:id/reactivate', requireAuth, async (req, res) => {
   }
 });
 
-// POST /org/transfer — move a departed member's workflow to a new hire.
+// POST /org/transfer â move a departed member's workflow to a new hire.
 app.post('/org/transfer', requireAuth, async (req, res) => {
   try {
     const ctx = await loadOrgContext(req.user.id);
@@ -533,7 +533,7 @@ app.get('/events', requireAuth, async (req, res) => {
         rows = await q('SELECT * FROM events WHERE user_id = $1 AND starts_at >= $2 AND starts_at <= $3 ORDER BY starts_at ASC', [req.user.id, start, end]);
       }
     }
-    // Fetch and merge Google Calendar events from primary calendar (best-effort â silent on failure).
+    // Fetch and merge Google Calendar events from primary calendar (best-effort Ã¢ÂÂ silent on failure).
     let gcalRows = [];
     let gcalError = null;
     let gcalRan = false;
@@ -622,7 +622,7 @@ app.get('/events', requireAuth, async (req, res) => {
 
 // ===== (this comment will be replaced) =====
 // ============================================================
-// Gmail email integration — three endpoints:
+// Gmail email integration â three endpoints:
 //   GET  /emails/search?name=&address=&claim_number=&policy_number=&carrier=&insured_email=&days=30
 //        Returns up to 30 most-recent matching emails (metadata only)
 //   GET  /emails/:msgId
@@ -671,14 +671,14 @@ async function _ampleGoogleToken(userId) {
   return accessToken;
 }
 
-// Header extraction helper — Gmail returns headers as [{name, value}, ...]
+// Header extraction helper â Gmail returns headers as [{name, value}, ...]
 function _headerVal(headers, name) {
   if (!headers) return '';
   const h = headers.find(x => (x.name || '').toLowerCase() === name.toLowerCase());
   return h ? (h.value || '') : '';
 }
 
-// Decode base64url body — Gmail uses URL-safe base64
+// Decode base64url body â Gmail uses URL-safe base64
 function _decodeB64Url(s) {
   if (!s) return '';
   const padded = s.replace(/-/g, '+').replace(/_/g, '/');
@@ -695,7 +695,7 @@ function _extractParts(payload, out) {
     if (mime === 'text/plain') out.text = (out.text || '') + text;
     else if (mime === 'text/html') out.html = (out.html || '') + text;
   }
-  // Attachments — bodies referenced by attachmentId
+  // Attachments â bodies referenced by attachmentId
   if (payload.filename && payload.filename.length && payload.body && payload.body.attachmentId) {
     out.attachments = out.attachments || [];
     out.attachments.push({
@@ -710,14 +710,14 @@ function _extractParts(payload, out) {
   }
 }
 
-// GET /emails/search — find emails matching a claim
+// GET /emails/search â find emails matching a claim
 app.get('/emails/search', requireAuth, async (req, res) => {
   try {
     const accessToken = await _ampleGoogleToken(req.user.id);
     if (!accessToken) {
       return res.json({ messages: [], _debug: { error: 'not_connected' } });
     }
-    // Build a TIGHT Gmail query. Only include genuinely identifying signals — a
+    // Build a TIGHT Gmail query. Only include genuinely identifying signals â a
     // bare carrier name ("State Farm") or a common first name matches the entire
     // inbox, which is what we want to avoid.
     //
@@ -742,7 +742,7 @@ app.get('/emails/search', requireAuth, async (req, res) => {
     if (req.query.policy_number) { const t = phrase(req.query.policy_number); if (t) trustedTerms.push(t); }
     if (req.query.insured_email) {
       const em = String(req.query.insured_email).trim();
-      // SAFEGUARD: never search the user's OWN email as the insured email — it
+      // SAFEGUARD: never search the user's OWN email as the insured email â it
       // would match every message in their inbox. Drop it if it matches.
       let userEmail = '';
       try {
@@ -788,7 +788,7 @@ app.get('/emails/search', requireAuth, async (req, res) => {
     if (!ids.length) {
       return res.json({ messages: [], _debug: { q, total_matches: 0 } });
     }
-    // Step 2: fetch metadata for each — parallel
+    // Step 2: fetch metadata for each â parallel
     const metaPromises = ids.map(async (id) => {
       try {
         const mResp = await fetch(
@@ -824,7 +824,7 @@ app.get('/emails/search', requireAuth, async (req, res) => {
   }
 });
 
-// GET /emails/:msgId — full body
+// GET /emails/:msgId â full body
 app.get('/emails/:msgId', requireAuth, async (req, res) => {
   try {
     const accessToken = await _ampleGoogleToken(req.user.id);
@@ -864,7 +864,7 @@ app.get('/emails/:msgId', requireAuth, async (req, res) => {
   }
 });
 
-// GET /emails/:msgId/attachment/:attId — download one Gmail attachment's bytes (base64)
+// GET /emails/:msgId/attachment/:attId â download one Gmail attachment's bytes (base64)
 app.get('/emails/:msgId/attachment/:attId', requireAuth, async (req, res) => {
   try {
     const accessToken = await _ampleGoogleToken(req.user.id);
@@ -886,7 +886,7 @@ app.get('/emails/:msgId/attachment/:attId', requireAuth, async (req, res) => {
   }
 });
 
-// POST /emails/send — send a new email/reply via Gmail API (needs gmail.send scope). Supports one optional attachment.
+// POST /emails/send â send a new email/reply via Gmail API (needs gmail.send scope). Supports one optional attachment.
 app.post('/emails/send', requireAuth, async (req, res) => {
   try {
     const accessToken = await _ampleGoogleToken(req.user.id);
@@ -965,7 +965,7 @@ app.post('/emails/send', requireAuth, async (req, res) => {
   }
 });
 
-// POST /emails/:msgId/extract — Claude extracts claim fields from email body
+// POST /emails/:msgId/extract â Claude extracts claim fields from email body
 app.post('/emails/:msgId/extract', requireAuth, async (req, res) => {
   try {
     const accessToken = await _ampleGoogleToken(req.user.id);
@@ -1344,7 +1344,7 @@ app.post('/webhooks/zapier/claimwizard/:secret', async (req, res) => {
       return res.status(401).json({ error: 'invalid secret' });
     }
 
-    // Owner lookup — by configured email so we don't need a per-user token yet
+    // Owner lookup â by configured email so we don't need a per-user token yet
     const ur = await pool.query(
       "SELECT id, org_id FROM users WHERE LOWER(email) = $1 LIMIT 1",
       [ZAPIER_USER_EMAIL]
@@ -1353,7 +1353,7 @@ app.post('/webhooks/zapier/claimwizard/:secret', async (req, res) => {
     const userId = ur.rows[0].id;
     const orgId = ur.rows[0].org_id || null;
 
-    // Field mapping — Zapier lets the user map ClaimWizard fields to whatever
+    // Field mapping â Zapier lets the user map ClaimWizard fields to whatever
     // keys they want, so we accept many common variants for each field.
     const b = req.body || {};
     const pickStr = (...keys) => {
@@ -1528,7 +1528,7 @@ app.post('/analyze', requireAuth, requireActiveSubscription, async (req, res) =>
       return res.status(502).json({ error: 'bad_model_output', raw: cleaned });
     }
 
-    // Cost calc: Claude Sonnet 4.6 input ~$3/Mtok, output ~$15/Mtok (approx — update as needed)
+    // Cost calc: Claude Sonnet 4.6 input ~$3/Mtok, output ~$15/Mtok (approx â update as needed)
     const usage = data.usage || {};
     const costCents = Math.ceil(
       ((usage.input_tokens || 0) * 0.0003 + (usage.output_tokens || 0) * 0.0015)
@@ -1675,12 +1675,12 @@ app.post('/supplements/analyze', requireAuth, requireActiveSubscription, async (
 });
 
 // ============================================================
-// POST /policy/extract â Dec page / policy auto-extract via Claude vision
+// POST /policy/extract Ã¢ÂÂ Dec page / policy auto-extract via Claude vision
 // Drop this entire block into server.js anywhere with the other app.post(...) routes.
 // Requires: ANTHROPIC_API_KEY env var (already set in Render for /analyze).
 // ============================================================
 
-// POST /estimate/extract — pull money figures off a carrier estimate / payment doc via Claude vision
+// POST /estimate/extract â pull money figures off a carrier estimate / payment doc via Claude vision
 app.post('/estimate/extract', requireAuth, async (req, res) => {
   try {
     const { image_base64, media_type, pdf_base64, filename } = req.body || {};
@@ -1735,7 +1735,7 @@ Rules:
   }
 });
 
-// ===== Cloud claim sync — full claim JSON (incl. embedded files) per user, last-write-wins =====
+// ===== Cloud claim sync â full claim JSON (incl. embedded files) per user, last-write-wins =====
 let _claimsTableReady = false;
 async function _ensureClaimsTable() {
   if (_claimsTableReady) return;
@@ -1795,7 +1795,7 @@ app.post('/policy/extract', requireAuth, async (req, res) => {
       return res.status(500).json({ error: 'no_api_key' });
     }
 
-    // Build the Claude message â image OR PDF (document) block, plus the extraction prompt
+    // Build the Claude message Ã¢ÂÂ image OR PDF (document) block, plus the extraction prompt
     const content = [];
     if (pdf_base64) {
       content.push({
@@ -1847,7 +1847,7 @@ Rules:
 - If a value is ambiguous or not clearly visible, return null for that key.
 - Do not invent values. Do not include keys other than those above.
 - Coverages + deductible must be numeric strings, no symbols ("350000" not "$350,000").
-- For "appraisal.available", return true ONLY if you can see explicit appraisal language. Many Dec pages don't include the appraisal clause text — in that case return null (not false). false is reserved for policies that explicitly say "this policy does NOT include an appraisal provision."
+- For "appraisal.available", return true ONLY if you can see explicit appraisal language. Many Dec pages don't include the appraisal clause text â in that case return null (not false). false is reserved for policies that explicitly say "this policy does NOT include an appraisal provision."
 - Output ONLY the JSON object. No markdown, no commentary, no code fences.`;
 
     content.push({ type: 'text', text: prompt });
@@ -1944,12 +1944,12 @@ app.post('/billing/portal', requireAuth, async (req, res) => {
 // ============ Weather history ============
 // Pulls hail / high-wind events near a property from the past N days.
 // Sources:
-//   - Open-Meteo Historical (wind gusts) — free, no API key
-//   - Iowa State Mesonet (NWS Local Storm Reports for hail) — free, no API key
-// Geocoding: Nominatim (OSM) — free, requires User-Agent header
+//   - Open-Meteo Historical (wind gusts) â free, no API key
+//   - Iowa State Mesonet (NWS Local Storm Reports for hail) â free, no API key
+// Geocoding: Nominatim (OSM) â free, requires User-Agent header
 // ============ SPC verification helpers ============
 // Cross-check raw NWS Local Storm Reports against SPC's curated daily storm reports.
-// SPC drops duplicates, retractions, and unconfirmed single-spotter calls — so SPC-verified
+// SPC drops duplicates, retractions, and unconfirmed single-spotter calls â so SPC-verified
 // events are the carrier-defensible subset that an adjuster can independently check.
 const _spcCache = new Map();
 const SPC_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -2206,7 +2206,7 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     const fieldValues = (body.field_values && typeof body.field_values === "object") ? body.field_values : {};
     if (!signerName || !signerEmail) return res.status(400).json({ error: "Client name and email are required" });
 
-    // Load the template — use the ORIGINAL pdf_base64 (no AI rebuild = no font/spacing drift)
+    // Load the template â use the ORIGINAL pdf_base64 (no AI rebuild = no font/spacing drift)
     const tpl = dsRowsOf(await q("SELECT id, name, filename, pdf_base64, field_map, doc_json FROM user_contracts WHERE user_id=$1 AND id = COALESCE($2::int, (SELECT MAX(id) FROM user_contracts S WHERE S.user_id=$1)) ORDER BY id DESC LIMIT 1", [req.user.id, templateId]));
     if (!tpl.length) return res.status(400).json({ error: "Upload your contract first" });
     const tplRow = tpl[0];
@@ -2230,10 +2230,10 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     } catch (e) { fieldMap = []; }
 
     // If this template was reflowed (rebuilt into a clean, evenly-spaced doc), send THAT
-    // instead of overlaying on the tight original — so the fill-in fields have real room.
+    // instead of overlaying on the tight original â so the fill-in fields have real room.
     let docObj = null;
     try { const dj = tplRow.doc_json; if (dj) docObj = (typeof dj === "object") ? dj : JSON.parse(String(dj)); } catch (e) { docObj = null; }
-    // Reflow/rebuild disabled — always keep the user's EXACT uploaded PDF (same pages, same fonts)
+    // Reflow/rebuild disabled â always keep the user's EXACT uploaded PDF (same pages, same fonts)
     // and overlay the fill-in text onto it, auto-shrunk to fit each blank.
     const useRebuilt = false;
 
@@ -2241,7 +2241,7 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     const typeOf = (f) => String((f && (f.type || f.id || f.name)) || "other").toLowerCase();
     const isNorm = (f) => f && f.nx != null && f.ny != null;
 
-    // Auto-fill values pulled from the claim — "fill in what it can".
+    // Auto-fill values pulled from the claim â "fill in what it can".
     const _today = new Date().toLocaleDateString("en-US");
     const autoVals = {
       client_name: signerName,
@@ -2370,7 +2370,7 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     };
 
     // Build form_fields_per_document. Coordinates are TOP-LEFT points (Dropbox Sign).
-    // Skipped for reflowed contracts — those use in-document text tags instead.
+    // Skipped for reflowed contracts â those use in-document text tags instead.
     let fields = [];
     if (!useTextTags) {
     let apiSeq = 0;
@@ -2469,7 +2469,7 @@ app.post("/contracts/send", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Could not send contract" });
   }
 });
-// GET /contracts/sent-doc/:id — the exact PDF that was sent for signature (preview/print while awaiting).
+// GET /contracts/sent-doc/:id â the exact PDF that was sent for signature (preview/print while awaiting).
 app.get("/contracts/sent-doc/:id", requireAuth, async (req, res) => {
   try {
     await ensureContractsSchema();
@@ -2556,7 +2556,7 @@ app.post("/contracts/template/fieldmap", requireAuth, async (req, res) => {
   }
 });
 
-const DETECT_FIELDS_PROMPT = `You are looking at page images of a roofing contract. Find every BLANK FILL-IN FIELD that a person would write into: an empty underline, a blank space after a printed label, or an empty box. For each blank, give its position as a fraction of the page from 0 to 1, where x and y are the TOP-LEFT corner measured from the top-left of the page, and w and h are the width and height of the WRITABLE SPACE for the answer. For w, capture the FULL horizontal room available to write the value: start where the blank begins (just after its printed label) and extend right until you reach the next printed text/label OR the right margin, whichever comes first — measure the entire empty writing area, NOT just a short visible underline. This makes long values (like a full insurance company name) fit. Classify each blank as one of these types by reading the printed label next to it: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, signature, date_signed, check_nonemergency, check_emergency, check_supplemental, check_reopen, other. Use signature for where the customer signs their name. Use date_signed for the date blank right beside that customer signature. Use agreement_date for a contract date or agreement date near the top of the document. Use price for any contract price, total, amount, or dollar figure blank. ALSO look for a claim-type section with small empty checkbox squares (or blank parentheses/brackets) next to the printed words Non-Emergency, Emergency, Supplemental, and Reopen (sometimes labeled 'Type of Claim' or 'Type of Loss'); return one field for each such checkbox with the matching type check_nonemergency, check_emergency, check_supplemental, or check_reopen, positioned tightly on the little box itself (w and h roughly 0.02). Be precise with coordinates so the box sits directly on the blank. Return ONLY a JSON array and nothing else, in exactly this shape: [{"type":"client_name","page":1,"x":0.35,"y":0.21,"w":0.4,"h":0.03}]. The page value is 1-based. If you find no blanks, return [].`;
+const DETECT_FIELDS_PROMPT = `You are looking at page images of a roofing contract. Find every BLANK FILL-IN FIELD that a person would write into: an empty underline, a blank space after a printed label, or an empty box. For each blank, give its position as a fraction of the page from 0 to 1, where x and y are the TOP-LEFT corner measured from the top-left of the page, and w and h are the width and height of the WRITABLE SPACE for the answer. For w, capture the FULL horizontal room available to write the value: start where the blank begins (just after its printed label) and extend right until you reach the next printed text/label OR the right margin, whichever comes first â measure the entire empty writing area, NOT just a short visible underline. This makes long values (like a full insurance company name) fit. Classify each blank as one of these types by reading the printed label next to it: client_name, property_address, phone, email, carrier, claim_number, price, scope, agreement_date, signature, date_signed, check_nonemergency, check_emergency, check_supplemental, check_reopen, other. Use signature for where the customer signs their name. Use date_signed for the date blank right beside that customer signature. Use agreement_date for a contract date or agreement date near the top of the document. Use price for any contract price, total, amount, or dollar figure blank. ALSO look for a claim-type section with small empty checkbox squares (or blank parentheses/brackets) next to the printed words Non-Emergency, Emergency, Supplemental, and Reopen (sometimes labeled 'Type of Claim' or 'Type of Loss'); return one field for each such checkbox with the matching type check_nonemergency, check_emergency, check_supplemental, or check_reopen, positioned tightly on the little box itself (w and h roughly 0.02). Be precise with coordinates so the box sits directly on the blank. Return ONLY a JSON array and nothing else, in exactly this shape: [{"type":"client_name","page":1,"x":0.35,"y":0.21,"w":0.4,"h":0.03}]. The page value is 1-based. If you find no blanks, return [].`;
 
 app.post("/contracts/detect-fields", requireAuth, async (req, res) => {
   if (req.user && req.user.org_id && req.user.org_role === 'member') return res.status(403).json({ error: 'member_cannot_edit_templates', message: 'Your team owner manages contract templates.' });
@@ -2594,7 +2594,7 @@ app.post("/contracts/detect-fields", requireAuth, async (req, res) => {
   }
 });
 
-const REBUILD_PROMPT = `You are given a roofing, home improvement, or public adjuster contract document. Transcribe the ENTIRE contract exactly, word for word. Do not summarize, reword, shorten, paraphrase, or omit anything. Every clause, sentence, term, number, percentage, dollar amount, license number, warranty, and notice must be reproduced exactly as written. Identify the structure of the document and estimate the font size of each part so the original sizing is preserved exactly. Return ONLY a JSON object and nothing else, in this exact shape: {"title":"the contract title","title_size":16,"sections":[ ]}. title_size is the point size of the title. Each item in sections must be one of these four forms: {"kind":"heading","text":"a heading exactly as written","size":12} or {"kind":"paragraph","text":"a clause or paragraph transcribed word for word","size":10} or {"kind":"field","label":"the printed label of a fill-in blank","field_id":"an id from the list","multiline":false,"size":10,"signer":"client, client2, or adjuster"} or {"kind":"signature","label":"the party who signs here","signer":"client, client2, or adjuster"}. The size value is your best estimate of the printed font size in points. Typical contract body text is 9 to 12 points. Most body paragraphs share one consistent size, so use the same size for them; only report a different size when the original clearly prints that text larger or smaller. Pay very close attention to any text printed larger or smaller than the body, such as a required legal notice, disclosure, or cancellation notice, and estimate its size accurately, because that exact size must be preserved for legal compliance. For every blank line, underline, or labeled fill-in space, emit a field section. Choose field_id from this list: client_name, property_address, phone, email, carrier, claim_number, price, percentage, scope, agreement_date, date_signed, initials, claim_type, other. If the contract has a section asking what kind of claim this is — with options such as Non-Emergency, Emergency, Supplemental, and Reopen (often shown as checkboxes, sometimes titled 'Type of Claim' or 'Type of Loss') — emit it as ONE single field with field_id 'claim_type' and label 'Type of Claim', and do NOT also transcribe those option words as a paragraph (the renderer draws the checkboxes itself). Use percentage for any blank that holds a percent value, such as next to a percent sign, an adjuster fee, a contractor fee, a retainer share, or a percent of net proceeds. Use initials for any spot where the client puts their initials rather than a full signature, such as initialing a page or initialing next to a specific clause. Set multiline to true only for large write-in areas such as the scope or description of work. Represent each signing area as a single signature section. For every signature, initials, and date_signed spot, also set a signer property: use "client" for the primary customer, insured, homeowner, or property owner; use "client2" for a second, different insured or co-owner who has their own separate signature line, such as a co-insured or a spouse or a second property owner; use "adjuster" for the public adjuster, adjuster, contractor, roofer, company, or firm representative. When the document has two separate signature lines on the customer side, use "client" for the first and "client2" for the second. When you cannot tell, use "client". Keep every section in the original reading order and transcribe the document completely from start to finish.`;
+const REBUILD_PROMPT = `You are given a roofing, home improvement, or public adjuster contract document. Transcribe the ENTIRE contract exactly, word for word. Do not summarize, reword, shorten, paraphrase, or omit anything. Every clause, sentence, term, number, percentage, dollar amount, license number, warranty, and notice must be reproduced exactly as written. Identify the structure of the document and estimate the font size of each part so the original sizing is preserved exactly. Return ONLY a JSON object and nothing else, in this exact shape: {"title":"the contract title","title_size":16,"sections":[ ]}. title_size is the point size of the title. Each item in sections must be one of these four forms: {"kind":"heading","text":"a heading exactly as written","size":12} or {"kind":"paragraph","text":"a clause or paragraph transcribed word for word","size":10} or {"kind":"field","label":"the printed label of a fill-in blank","field_id":"an id from the list","multiline":false,"size":10,"signer":"client, client2, or adjuster"} or {"kind":"signature","label":"the party who signs here","signer":"client, client2, or adjuster"}. The size value is your best estimate of the printed font size in points. Typical contract body text is 9 to 12 points. Most body paragraphs share one consistent size, so use the same size for them; only report a different size when the original clearly prints that text larger or smaller. Pay very close attention to any text printed larger or smaller than the body, such as a required legal notice, disclosure, or cancellation notice, and estimate its size accurately, because that exact size must be preserved for legal compliance. For every blank line, underline, or labeled fill-in space, emit a field section. Choose field_id from this list: client_name, property_address, phone, email, carrier, claim_number, price, percentage, scope, agreement_date, date_signed, initials, claim_type, other. If the contract has a section asking what kind of claim this is â with options such as Non-Emergency, Emergency, Supplemental, and Reopen (often shown as checkboxes, sometimes titled 'Type of Claim' or 'Type of Loss') â emit it as ONE single field with field_id 'claim_type' and label 'Type of Claim', and do NOT also transcribe those option words as a paragraph (the renderer draws the checkboxes itself). Use percentage for any blank that holds a percent value, such as next to a percent sign, an adjuster fee, a contractor fee, a retainer share, or a percent of net proceeds. Use initials for any spot where the client puts their initials rather than a full signature, such as initialing a page or initialing next to a specific clause. Set multiline to true only for large write-in areas such as the scope or description of work. Represent each signing area as a single signature section. For every signature, initials, and date_signed spot, also set a signer property: use "client" for the primary customer, insured, homeowner, or property owner; use "client2" for a second, different insured or co-owner who has their own separate signature line, such as a co-insured or a spouse or a second property owner; use "adjuster" for the public adjuster, adjuster, contractor, roofer, company, or firm representative. When the document has two separate signature lines on the customer side, use "client" for the first and "client2" for the second. When you cannot tell, use "client". Keep every section in the original reading order and transcribe the document completely from start to finish.`;
 
 app.post("/contracts/rebuild", requireAuth, async (req, res) => {
   try {
@@ -2918,7 +2918,7 @@ async function renderContractPdf(doc, opts) {
       var ov = (mode === "filled" && fieldValues && fieldValues[fno] != null && String(fieldValues[fno]).trim() !== "") ? String(fieldValues[fno]) : "";
       var val = (mode === "filled") ? (ov || valueFor(fid)) : "";
       if (fid === "claim_type") {
-        // Claim-type checkbox row — X the option the PA picked at send time.
+        // Claim-type checkbox row â X the option the PA picked at send time.
         var _ct = String(body.claim_type || "").toLowerCase().replace(/[^a-z]/g, "");
         var _opts = [["nonemergency", "Non-Emergency"], ["emergency", "Emergency"], ["supplemental", "Supplemental"], ["reopen", "Reopen"]];
         need(fs * 3.2);
@@ -3015,7 +3015,7 @@ async function renderContractPdf(doc, opts) {
 async function buildLorPdf(opts = {}) {
   // STATIC FILL MODE: every form field is rendered as plain text from `opts.prefill`.
   // Only signatures, dates, and per-page initials remain as Dropbox Sign widgets,
-  // so the client just signs/initials — they don't fill anything.
+  // so the client just signs/initials â they don't fill anything.
   const p     = opts.prefill || {};
   const ROLE  = "signer1";
   const ROLE2 = "signer2";
@@ -3055,7 +3055,7 @@ async function buildLorPdf(opts = {}) {
   // Initials block lives ABOVE the footer (away from the page edge),
   // and uses the explicit 4-segment text-tag form so each page is its own widget.
   function footer(page, pn) {
-    // Initials line ~130pt above the bottom — well clear of the margin
+    // Initials line ~130pt above the bottom â well clear of the margin
     T(page, "Initials:", RIGHT - 145, 132, 11, bold);
     LINE(page, RIGHT - 90, 130, RIGHT);
     TAG(page, "[init|i" + pn + "|" + ROLE + "|req]", RIGHT - 70, 132, 8);
@@ -3286,7 +3286,7 @@ async function buildLorPdf(opts = {}) {
 }
 
 /* ===================================================================
-   buildWidenedLor — takes the user's EXACT uploaded LOR PDF and only
+   buildWidenedLor â takes the user's EXACT uploaded LOR PDF and only
    widens the cramped page-1 fill-in field rows, then fills every blank
    with the claim's values. Logo, body text, fonts, page count and
    footer are left pixel-identical. Coordinates were measured from the
@@ -3527,7 +3527,7 @@ app.post("/contracts/send-lor", requireAuth, async (req, res) => {
    show what auto-fill produces. Accepts optional prefill via query (JSON
    in `prefill`); otherwise uses representative sample values so the
    widened blanks are visibly filled. This is the same buildWidenedLor
-   used by the real send — the preview and the sent document match. */
+   used by the real send â the preview and the sent document match. */
 app.get("/contracts/lor-preview", requireAuth, async (req, res) => {
   try {
     let prefill = {};
@@ -3613,7 +3613,7 @@ const LETTER_TEMPLATES=[
     {p:'[[today]:format(long)]',tight:true},{gap:8},
     {p:'RE:  Policy #[[insurance.policynumber]],  Claim #[[insurance.claimnumber]]',bold:true,tight:true},{gap:10},
     {p:'Dear Claims:',tight:true},
-    {p:'This email is intended to place [[insurance.company]:blank(20)] on notice that the time period with which to adjust the loss with Smith Adjusters on behalf of [[policyholders.name]:delimit(, ( & ))] has expired as set forth in the policy of insurance and Florida Statute §627.70131.'},
+    {p:'This email is intended to place [[insurance.company]:blank(20)] on notice that the time period with which to adjust the loss with Smith Adjusters on behalf of [[policyholders.name]:delimit(, ( & ))] has expired as set forth in the policy of insurance and Florida Statute Â§627.70131.'},
     {p:'Please provide a coverage determination by close of business tomorrow or, in the alternative, explain the factors that currently exist that place the insurance company within factors beyond their control that are reasonably preventing a coverage determination.  Please note, it is not appropriate to respond to this correspondence with new, previous unrequested, compliance with policy conditions.'},
     {p:'Thank you,',tight:true},{gap:18},
     {p:'Alexander James Smith',tight:true},{p:'Public Adjuster - License #W844243',tight:true},{p:'Smith Adjusters',tight:true},{p:'407-927-0134',tight:true}
@@ -3654,7 +3654,7 @@ async function renderLetterPdf(tpl, data){
   let page=pdf.addPage([W,H]); let y=H-56;
   function header(){ const t1='SMITH ',t2='ADJUSTERS',s=17; const w1=bold.widthOfTextAtSize(t1,s),w2=bold.widthOfTextAtSize(t2,s),cx=(W-(w1+w2))/2;
     page.drawText(t1,{x:cx,y:y,size:s,font:bold,color:DARK}); page.drawText(t2,{x:cx+w1,y:y,size:s,font:bold,color:GREEN}); y-=16;
-    const addr='498 Palm Springs Dr., Suite 100  •  Altamonte Springs, FL 32701  •  407-927-0134  •  claims@smithadjusters.com';
+    const addr='498 Palm Springs Dr., Suite 100  â¢  Altamonte Springs, FL 32701  â¢  407-927-0134  â¢  claims@smithadjusters.com';
     const aw=helv.widthOfTextAtSize(addr,8); page.drawText(addr,{x:(W-aw)/2,y:y,size:8,font:helv,color:GREY}); y-=10;
     page.drawLine({start:{x:M,y:y},end:{x:RIGHT,y:y},thickness:1,color:GREEN}); y-=22; }
   function need(h){ if(y-h<70){ page=pdf.addPage([W,H]); pageIdx++; y=H-64; } }
@@ -4030,32 +4030,32 @@ function buildAnalysisPrompt({ slope, dateOfLoss, carrier, testSquare }) {
 Photo slope: ${slope || 'unknown'}.${contextNote}${testNote}
 
 ============================================================
-WHAT IS *NOT* DAMAGE — DO NOT HALLUCINATE
+WHAT IS *NOT* DAMAGE â DO NOT HALLUCINATE
 ============================================================
 
 Before you flag anything, read this list. A healthy asphalt-shingle roof has features that look superficially like damage but are not. Do not report any of these as findings:
 
 1. **Course overlap shadow lines.** Every asphalt shingle has a thin DARK HORIZONTAL LINE at its BOTTOM edge, because the next course of shingles overlaps the top half of each shingle and the bottom edge sits proud and casts a shadow. This shadow line runs across EVERY shingle on a healthy roof, in EVERY photo. It is NOT a crease. A real crease is on the EXPOSED FACE of ONE tab and appears as a fold or bend line, distinct from the natural course shadow at the tab's bottom edge.
 
-2. **Multi-color / blended granules.** Modern dimensional ("architectural") shingles are manufactured with intentional color variation — some tabs are reddish-brown, some gray, some tan, in a random mix. This is the product design, not weathering and not damage. Do NOT call a multi-tone shingle field "differential aging" or "two-tone hail zone."
+2. **Multi-color / blended granules.** Modern dimensional ("architectural") shingles are manufactured with intentional color variation â some tabs are reddish-brown, some gray, some tan, in a random mix. This is the product design, not weathering and not damage. Do NOT call a multi-tone shingle field "differential aging" or "two-tone hail zone."
 
-3. **Natural shadows at hips, ridges, and valleys.** Where two slopes meet, shingles butt against ridge caps or hip caps. The transition creates shadow lines and apparent edge irregularity. This is not "lifted tabs" or "displaced shingles." Verify true lift by looking for the underside of a shingle being visible, daylight under the tab, or exposed nail heads — not just a shadow at the ridge transition.
+3. **Natural shadows at hips, ridges, and valleys.** Where two slopes meet, shingles butt against ridge caps or hip caps. The transition creates shadow lines and apparent edge irregularity. This is not "lifted tabs" or "displaced shingles." Verify true lift by looking for the underside of a shingle being visible, daylight under the tab, or exposed nail heads â not just a shadow at the ridge transition.
 
-3a. **Hip and ridge cap shingles.** Cap shingles are folded individual pieces installed along ridge and hip lines as a separate course on top of the field shingles. By design they sit PROUD of the field — their bottom edge is elevated above the adjacent field course. They do not lie flat. A cap shingle visible in the upper portion of a slope photo (near where two roof planes meet) is almost certainly the hip cap, NOT a lifted field tab. Do not call hip/ridge cap shingles "lifted", "creased", "displaced", or "broken seal". Only flag a cap if a tab is visibly missing, torn, or rotated out of its expected position.
+3a. **Hip and ridge cap shingles.** Cap shingles are folded individual pieces installed along ridge and hip lines as a separate course on top of the field shingles. By design they sit PROUD of the field â their bottom edge is elevated above the adjacent field course. They do not lie flat. A cap shingle visible in the upper portion of a slope photo (near where two roof planes meet) is almost certainly the hip cap, NOT a lifted field tab. Do not call hip/ridge cap shingles "lifted", "creased", "displaced", or "broken seal". Only flag a cap if a tab is visibly missing, torn, or rotated out of its expected position.
 
 3b. **Edge-of-frame shingle artifacts.** A shingle at the extreme edge of the camera frame may appear to lift or angle due to camera perspective and lens distortion. If the only "anomaly" you can find is at the very edge of the image and is not corroborated by other indicators in the centered field of view, do not flag it.
 
-3c. **Ridge vents and shingle-over ridge vents.** A ridge vent runs continuously along the PEAK (ridge) of the roof to ventilate the attic. The common "shingle-over" type is a strip of vent material laid over a slot cut in the decking and then capped with ridge shingles — by design it has air gaps and a slightly raised profile, and from above it can look like a dark line, a thin recessed slot, or a stepped strip running along the ridge. This is INTENTIONAL ventilation, not damage. Do NOT flag a ridge vent or its air gap as a "missing shingle", "gap", "creasing", "displaced tab", or "granular loss". A continuous dark line along the peak of the roof is a ridge vent — examine it as a vent, not as a row of damaged tabs. The ONLY ridge-vent damage worth flagging is the vent material visibly torn loose, ridge cap shingles actually missing off the vent, or the vent crushed/displaced out of line — not the normal vent gap.
+3c. **Ridge vents and shingle-over ridge vents.** A ridge vent runs continuously along the PEAK (ridge) of the roof to ventilate the attic. The common "shingle-over" type is a strip of vent material laid over a slot cut in the decking and then capped with ridge shingles â by design it has air gaps and a slightly raised profile, and from above it can look like a dark line, a thin recessed slot, or a stepped strip running along the ridge. This is INTENTIONAL ventilation, not damage. Do NOT flag a ridge vent or its air gap as a "missing shingle", "gap", "creasing", "displaced tab", or "granular loss". A continuous dark line along the peak of the roof is a ridge vent â examine it as a vent, not as a row of damaged tabs. The ONLY ridge-vent damage worth flagging is the vent material visibly torn loose, ridge cap shingles actually missing off the vent, or the vent crushed/displaced out of line â not the normal vent gap.
 
 4. **Normal granule color variation across the slope.** Shingles oxidize unevenly over years. Some patches will look lighter or darker. Without LOCAL impact indicators (round mat exposure, fresh fracture, halo with intact surround), this is age, not hail.
 
-5. **Roof junk that isn't damage.** Leaves, twigs, pollen stains, algae streaks, lichen patches, satellite dishes, vents, pipe boots, footwear marks, sealant smears — none of these are storm damage on their own.
+5. **Roof junk that isn't damage.** Leaves, twigs, pollen stains, algae streaks, lichen patches, satellite dishes, vents, pipe boots, footwear marks, sealant smears â none of these are storm damage on their own.
 
-6. **Camera artifacts.** JPEG compression, motion blur, lens distortion, low contrast in shadowed areas, glare patches — do not interpret as damage.
+6. **Camera artifacts.** JPEG compression, motion blur, lens distortion, low contrast in shadowed areas, glare patches â do not interpret as damage.
 
 If you cannot point to a SPECIFIC visual indicator on a SPECIFIC tab or zone that matches the strict definitions below, return no finding for that area. It is correct and expected for a healthy roof photo to return findings: [] and claim_strength: "no-claim".
 
-DO NOT add a "wear_tear" finding just to describe normal age signs on a roof. The wear_tear category exists ONLY to document a pre-existing condition that a carrier will try to use against an otherwise legitimate storm finding. If there is no storm finding being made, do not add a wear_tear finding either — just return findings: []. Normal weathered roofs do not need to be documented as damaged.
+DO NOT add a "wear_tear" finding just to describe normal age signs on a roof. The wear_tear category exists ONLY to document a pre-existing condition that a carrier will try to use against an otherwise legitimate storm finding. If there is no storm finding being made, do not add a wear_tear finding either â just return findings: []. Normal weathered roofs do not need to be documented as damaged.
 
 ============================================================
 CONFIDENCE & LANGUAGE DISCIPLINE
@@ -4064,45 +4064,45 @@ CONFIDENCE & LANGUAGE DISCIPLINE
 Match your language to what you actually see:
 - If a damage signature is clearly visible (a crease, a missing shingle, a lifted tab, a hail bruise) describe it AFFIRMATIVELY and score severity on its merits per the SEVERITY CALIBRATION section. A clearly visible crease is a "crease", not a "possible crease". A gap in the course is a "missing shingle", not a "possible anomaly".
 - Use tentative words ("possible", "appears to", "may be") ONLY for genuinely borderline cases where you truly cannot tell. A genuinely borderline finding gets severity "minor", confidence "low", cause_origin "ambiguous".
-- Image resolution alone is NOT a reason to downgrade a clear finding. A missing shingle and a tab crease are both visible in a normal wide roof photo — do not push them to "minor/ambiguous" by hiding behind "limited resolution".
+- Image resolution alone is NOT a reason to downgrade a clear finding. A missing shingle and a tab crease are both visible in a normal wide roof photo â do not push them to "minor/ambiguous" by hiding behind "limited resolution".
 
-When the visual indicator is real and describable, USE "moderate" and "severe" — do not default everything to minor.
+When the visual indicator is real and describable, USE "moderate" and "severe" â do not default everything to minor.
 
 ============================================================
 YOUR JOB: ACTIVELY FIND THE DAMAGE
 ============================================================
 
-The damage is in the photo. Find it and commit to it. Do a systematic visual sweep of the entire roof surface, course by course, top to bottom, looking for the damage signatures below. Do NOT wait for chalk marks to tell you where to look — find the damage yourself.
+The damage is in the photo. Find it and commit to it. Do a systematic visual sweep of the entire roof surface, course by course, top to bottom, looking for the damage signatures below. Do NOT wait for chalk marks to tell you where to look â find the damage yourself.
 
 When a damage signature is clearly visible, COMMIT. State it affirmatively. Do not write "possible", "appears to be", "may be", "warrants close-up to confirm", or "unresolvable at this scale" for damage that is visibly present in the image. An adjuster needs a definite finding, not a list of maybes. Save tentative language strictly for genuinely borderline cases.
 
 SWEEP THE ROOF FOR THESE FOUR SIGNATURES:
 
-1. MISSING SHINGLE / MISSING TAB — highest priority, and the easiest to see. Scan every course for a GAP in the regular pattern.
-   WHAT IT LOOKS LIKE: a tab-sized area that is RECTANGULAR with DEFINED, SHARP EDGES, darker than the surrounding shingles because the tab is GONE and you are seeing the course beneath it, the dark underlayment, or the wood deck. It often sits slightly RECESSED — a step down — from the surrounding tabs, and the edges of the neighboring shingles frame it like a window. Its shape matches one tab's footprint and aligns to the course grid.
-   CRITICAL — MISSING SHINGLE vs. GRANULE LOSS: a sharp-edged, tab-sized, rectangular dark zone is a MISSING SHINGLE. It is NOT "granular loss" and NOT "granule displacement". Granule loss is diffuse, gradual, and irregular in shape — it NEVER forms a clean tab-shaped rectangle with defined edges. If you find yourself describing "a dark rectangular zone the size of one tab with defined edges" or "a darker rectangular area localized to one tab" — STOP. That is a MISSING SHINGLE. Classify it as a missing shingle.
-   A missing shingle is ALWAYS category "wind" and ALWAYS severity "severe". Label the finding TYPE exactly "Missing shingle" — never "granular loss", "granule displacement", "localized granule displacement", "dark zone", "dark exposure", or "discoloration". A missing shingle is one of the strongest claim items that exists; never miss one, never downgrade one, and never mislabel one as granule loss.
+1. MISSING SHINGLE / MISSING TAB â highest priority, and the easiest to see. Scan every course for a GAP in the regular pattern.
+   WHAT IT LOOKS LIKE: a tab-sized area that is RECTANGULAR with DEFINED, SHARP EDGES, darker than the surrounding shingles because the tab is GONE and you are seeing the course beneath it, the dark underlayment, or the wood deck. It often sits slightly RECESSED â a step down â from the surrounding tabs, and the edges of the neighboring shingles frame it like a window. Its shape matches one tab's footprint and aligns to the course grid.
+   CRITICAL â MISSING SHINGLE vs. GRANULE LOSS: a sharp-edged, tab-sized, rectangular dark zone is a MISSING SHINGLE. It is NOT "granular loss" and NOT "granule displacement". Granule loss is diffuse, gradual, and irregular in shape â it NEVER forms a clean tab-shaped rectangle with defined edges. If you find yourself describing "a dark rectangular zone the size of one tab with defined edges" or "a darker rectangular area localized to one tab" â STOP. That is a MISSING SHINGLE. Classify it as a missing shingle.
+   A missing shingle is ALWAYS category "wind" and ALWAYS severity "severe". Label the finding TYPE exactly "Missing shingle" â never "granular loss", "granule displacement", "localized granule displacement", "dark zone", "dark exposure", or "discoloration". A missing shingle is one of the strongest claim items that exists; never miss one, never downgrade one, and never mislabel one as granule loss.
 
-2. SHINGLE CREASE — a dark fold/bend line across the FACE of an individual tab (not the shadow line at the tab's bottom edge). Often runs horizontal or slightly diagonal across the mid-to-upper tab face, frequently with fractured or lighter granules along the fold. One clearly visible crease = MODERATE. Two or more creases on the same slope = SEVERE. A visible crease is a crease — do not call it "possible". Examine each horizontal line on a slope on its own — do not sweep every dark line into "course shadow" in one judgment. A course-overlap shadow runs continuously across the full width of the course at the very bottom edge of the tabs above it; a crease is confined to about one tab and sits up on the tab face above that bottom edge, often with a slight kink or granule disturbance. If a line clearly sits on a tab face rather than at a course bottom edge, it is a crease — report it even on a wide, full-slope photo. A crease sits on an intact tab that is still in place: if the dark lines are inside a tab-shaped gap where a tab is missing, those are the edges and shadow lines of the course exposed beneath — that is ONE missing shingle, not creases.
+2. SHINGLE CREASE â a dark fold/bend line across the FACE of an individual tab (not the shadow line at the tab's bottom edge). Often runs horizontal or slightly diagonal across the mid-to-upper tab face, frequently with fractured or lighter granules along the fold. One clearly visible crease = MODERATE. Two or more creases on the same slope = SEVERE. A visible crease is a crease â do not call it "possible". Examine each horizontal line on a slope on its own â do not sweep every dark line into "course shadow" in one judgment. A course-overlap shadow runs continuously across the full width of the course at the very bottom edge of the tabs above it; a crease is confined to about one tab and sits up on the tab face above that bottom edge, often with a slight kink or granule disturbance. If a line clearly sits on a tab face rather than at a course bottom edge, it is a crease â report it even on a wide, full-slope photo. A crease sits on an intact tab that is still in place: if the dark lines are inside a tab-shaped gap where a tab is missing, those are the edges and shadow lines of the course exposed beneath â that is ONE missing shingle, not creases.
 
-3. LIFTED / CURLED TAB — a tab corner or edge raised off the course below, casting its own shadow and breaking the flat plane of the slope. Moderate, or severe if the underside / daylight is visible.
+3. LIFTED / CURLED TAB â a tab corner or edge raised off the course below, casting its own shadow and breaking the flat plane of the slope. Moderate, or severe if the underside / daylight is visible.
 
-4. HAIL IMPACT — circular bruise or dark spot with granule displacement in a random scatter pattern.
+4. HAIL IMPACT â circular bruise or dark spot with granule displacement in a random scatter pattern.
 
-CHALK MARKS — a field inspector's chalk mark (any color; circle, tick, dash, line, X, or arrow) is a POINTER to damage, not damage itself. Inspectors mark on, just above, or beside a defect so the mark stays visible without covering it. The chalk mark is ink — it is NEVER a finding on its own, and it is never sealant or a repair smear. Each chalk mark points to exactly ONE defect: the single clearest defect in its immediate vicinity, almost always the shingle directly below or right beside the mark. Identify what that one defect actually is — missing tab, crease, lifted tab, or hail hit — and report it as ONE finding with confidence "high", because a professional already verified it on the roof. Do NOT also report the chalk mark's own location as a separate finding. Do NOT invent a crease or any other defect at the mark just because a mark is there. If you cannot resolve exactly what the marked defect is, still report only ONE finding for that mark. A chalk mark visible anywhere in the photo — including near an edge or corner of the frame — marks a real defect that is IN the photo, at or right beside the mark. Find that defect and report it as a finding. NEVER dismiss a visible chalk mark as pointing to something "outside the image", as "for reference only", or as "needing another photo": if the chalk is in frame, the defect it marks is in frame. Chalk marks are corroboration, not a prerequisite: still detect un-chalked damage on your own.
+CHALK MARKS â a field inspector's chalk mark (any color; circle, tick, dash, line, X, or arrow) is a POINTER to damage, not damage itself. Inspectors mark on, just above, or beside a defect so the mark stays visible without covering it. The chalk mark is ink â it is NEVER a finding on its own, and it is never sealant or a repair smear. Each chalk mark points to exactly ONE defect: the single clearest defect in its immediate vicinity, almost always the shingle directly below or right beside the mark. Identify what that one defect actually is â missing tab, crease, lifted tab, or hail hit â and report it as ONE finding with confidence "high", because a professional already verified it on the roof. Do NOT also report the chalk mark's own location as a separate finding. Do NOT invent a crease or any other defect at the mark just because a mark is there. If you cannot resolve exactly what the marked defect is, still report only ONE finding for that mark. A chalk mark visible anywhere in the photo â including near an edge or corner of the frame â marks a real defect that is IN the photo, at or right beside the mark. Find that defect and report it as a finding. NEVER dismiss a visible chalk mark as pointing to something "outside the image", as "for reference only", or as "needing another photo": if the chalk is in frame, the defect it marks is in frame. Chalk marks are corroboration, not a prerequisite: still detect un-chalked damage on your own.
 
-ONE DEFECT = ONE FINDING — DO NOT MULTIPLY. Report one finding per distinct physical defect you can actually see and point to. Never split a single defect into several findings, and never add a finding for a vague impression ("granules look disturbed nearby", "texture seems off") — that is not a separate defect. Before adding a second or third finding to a photo, confirm it is a genuinely separate defect on a different shingle, clearly visible in the image. If you are not certain a second item is real, leave it out and note it in adjuster_notes instead. A photo showing one chalk-marked defect should produce exactly ONE finding. Precision earns more carrier credibility than a long list.
+ONE DEFECT = ONE FINDING â DO NOT MULTIPLY. Report one finding per distinct physical defect you can actually see and point to. Never split a single defect into several findings, and never add a finding for a vague impression ("granules look disturbed nearby", "texture seems off") â that is not a separate defect. Before adding a second or third finding to a photo, confirm it is a genuinely separate defect on a different shingle, clearly visible in the image. If you are not certain a second item is real, leave it out and note it in adjuster_notes instead. A photo showing one chalk-marked defect should produce exactly ONE finding. Precision earns more carrier credibility than a long list.
 
 ============================================================
-WIND DAMAGE — RIGOROUS IDENTIFICATION (CO-EQUAL TO HAIL)
+WIND DAMAGE â RIGOROUS IDENTIFICATION (CO-EQUAL TO HAIL)
 ============================================================
 
-Wind damage is the second most contested call. Carriers love to call creased and lifted shingles "old" or "installation defect." It usually isn't — wind damage is covered, frequent, and dollar-for-dollar one of the strongest claim drivers because EACH creased or lifted shingle is a separate line-item replacement.
+Wind damage is the second most contested call. Carriers love to call creased and lifted shingles "old" or "installation defect." It usually isn't â wind damage is covered, frequent, and dollar-for-dollar one of the strongest claim drivers because EACH creased or lifted shingle is a separate line-item replacement.
 
-The single most important wind indicator is SHINGLE CREASING. Learn it — and do NOT confuse it with normal course shadow lines:
+The single most important wind indicator is SHINGLE CREASING. Learn it â and do NOT confuse it with normal course shadow lines:
 
 - A crease is a fold line on the EXPOSED FACE of an INDIVIDUAL tab, distinct from the natural shadow at the tab's bottom edge.
-- It appears as a thin DARK CRACK, BEND LINE, or pinch mark on the FACE of the tab — not at the boundary between two tabs.
+- It appears as a thin DARK CRACK, BEND LINE, or pinch mark on the FACE of the tab â not at the boundary between two tabs.
 - A real crease often shows: (a) a fracture in the granule layer along the fold, (b) granules popped off along the fold line exposing the mat underneath, (c) a slight surface deformation visible as a height change.
 - It is caused by wind lifting the tab up and back past its elastic limit, breaking the seal strip, and the shingle returning to a roughly flat position with a permanent bend.
 - DO NOT call the natural horizontal shadow at the BOTTOM of each tab a crease. That shadow is the course overlap and appears on every healthy roof.
@@ -4120,16 +4120,16 @@ Other strong wind indicators (ANY one is sufficient for "wind" classification):
 - Debris impact marks (branch strikes, scuffs from blown debris)
 - Directional granule streaks along slope grain
 
-When you see chalk marks on a slope and the area looks "fine" — look again specifically for a dark horizontal line across the top of those tabs. That is almost certainly what was marked.
+When you see chalk marks on a slope and the area looks "fine" â look again specifically for a dark horizontal line across the top of those tabs. That is almost certainly what was marked.
 
 ============================================================
-SEVERITY CALIBRATION — THIS IS HOW YOU ASSIGN SEVERE / MODERATE / MINOR
+SEVERITY CALIBRATION â THIS IS HOW YOU ASSIGN SEVERE / MODERATE / MINOR
 ============================================================
 
 Severity is the most-misused field in your output. Calibrate it correctly:
 
-**SEVERE** — Use for any of:
-- Missing shingle or missing tab (any cause — wind is the default attribution unless clearly torn off by a tree branch etc.)
+**SEVERE** â Use for any of:
+- Missing shingle or missing tab (any cause â wind is the default attribution unless clearly torn off by a tree branch etc.)
 - Displaced shingle out of its course position
 - Visible torn mat or large exposed mat fracture
 - Two or more creased tabs visible on the same slope in the same photo
@@ -4137,28 +4137,28 @@ Severity is the most-misused field in your output. Calibrate it correctly:
 - A creased tab co-located with mat exposure or granule loss along the crease line
 - Any structural breach (puncture through the deck visible)
 
-**MODERATE** — Use for any of:
+**MODERATE** â Use for any of:
 - A single clearly visible crease on a single tab (dark fold line on the exposed tab face, not the bottom-edge course shadow)
 - A single clearly visible hail bruise with mat fracture and granule halo
 - Confirmed lifted tab corner without daylight underneath
 - A chalk-marked tab where you can also visually identify the damage indicator the inspector marked
 
-**MINOR** — Use for any of:
+**MINOR** â Use for any of:
 - Granule displacement at one edge of one tab with no fracture
 - Surface scuff or directional streak
 - A chalk-marked area where you can see SOMETHING is off but cannot resolve the exact indicator
 
-**NONE / NO FINDING** — Use when no specific damage is visible.
+**NONE / NO FINDING** â Use when no specific damage is visible.
 
 CRITICAL: A creased shingle is FAILED. The seal strip is broken, the tab is no longer wind-resistant, and water can intrude. Do NOT call a clearly visible crease "minor." A single confirmed crease is MODERATE. Two or more confirmed creases on the same slope is SEVERE.
 
 A missing shingle/tab is ALWAYS at least MODERATE and almost always SEVERE. It is also WIND damage (category: "wind"), not "OTHER", unless there is specific reason to attribute it elsewhere.
 
 ============================================================
-BOUNDING BOX — DRAW IT ON THE DAMAGE
+BOUNDING BOX â DRAW IT ON THE DAMAGE
 ============================================================
 
-The "bbox" field must cover the DAMAGED SHINGLE itself — the tab with the crease, the missing piece, the impact halo. The bbox is NOT placed on:
+The "bbox" field must cover the DAMAGED SHINGLE itself â the tab with the crease, the missing piece, the impact halo. The bbox is NOT placed on:
 - A chalk mark near the damage (move the bbox to the actual damaged tab)
 - A general area where you "think" damage might be (move the bbox to the specific indicator)
 - A wide region around the damage (tighten the bbox to the affected tab)
@@ -4166,7 +4166,7 @@ The "bbox" field must cover the DAMAGED SHINGLE itself — the tab with the crea
 If you cannot place a tight bbox on a specific damaged tab, you do not have a finding. Return findings: [] or fewer findings.
 
 ============================================================
-HAIL DAMAGE — RIGOROUS IDENTIFICATION
+HAIL DAMAGE â RIGOROUS IDENTIFICATION
 ============================================================
 
 The most contested call in roofing claims is hail vs. age. Carriers default to "age." You default to documenting hail when the indicators support it.
@@ -4179,39 +4179,39 @@ Any ONE of these is a STRONG hail indicator (sufficient for "hail" classificatio
 - Fresh, dark exposed mat with no oxidation (recent damage, not weathered)
 - Multiple impacts of consistent diameter on the same slope (storms produce hailstones of similar size)
 - Soft "bruise" feel inferable from the image (slight mat depression even when granules remain)
-- Damage to soft metals on the roof (vents, gutters, flashing, A/C condenser fins, mailbox) — these corroborate hail on the shingles
+- Damage to soft metals on the roof (vents, gutters, flashing, A/C condenser fins, mailbox) â these corroborate hail on the shingles
 
 Hail on asphalt shingles often shows as a halo: a center spot where the mat is fractured, surrounded by a ring where granules are displaced. Look for this signature.
 
 ============================================================
-HAIL ON CLOSE-UP PHOTOS — COMMIT TO THE FINDING
+HAIL ON CLOSE-UP PHOTOS â COMMIT TO THE FINDING
 ============================================================
 
 A close-up shingle photo is taken for ONE reason: the field adjuster already sees a hail hit and wants it documented. On a tight close-up framed on a shingle, COMMIT to the finding. Do not return "no damage" on a tight close-up unless the shingle is genuinely clean.
 
 A hail bruise does NOT always look like a dark exposed-mat crater. It very commonly appears as:
-- A LIGHTER circular spot — the impact knocked colored granules loose and exposed the paler granule layer beneath, or scuffed the surface lighter
-- A circular spot of DISTURBED TEXTURE — granules pocked, scuffed, crushed, or shoved aside — even when the color barely differs from the shingle around it
+- A LIGHTER circular spot â the impact knocked colored granules loose and exposed the paler granule layer beneath, or scuffed the surface lighter
+- A circular spot of DISTURBED TEXTURE â granules pocked, scuffed, crushed, or shoved aside â even when the color barely differs from the shingle around it
 - A soft round depression that catches light differently from the flat shingle surface
 - A self-contained round spot roughly 1/4" to 1.5" across, with the shingle immediately around it untouched
 
-TEXTURE is the proof, not color. If granules inside a discrete round area look scuffed, pocked, crushed, or displaced, that is a hail impact — whether the spot is lighter OR darker than its surroundings.
+TEXTURE is the proof, not color. If granules inside a discrete round area look scuffed, pocked, crushed, or displaced, that is a hail impact â whether the spot is lighter OR darker than its surroundings.
 
-PROHIBITED DISMISSALS. For a discrete, roughly circular spot you must NOT explain it away as "sunlight reflection," "sun differential," "glare," "shadow," "uneven lighting," or "camera flash." Sunlight and shadow fall across a roof in broad gradients with soft edges — they physically cannot create a single isolated round spot a couple of inches wide surrounded by normal shingle. A discrete circular spot was made by an impact, not by light. Classify it as hail.
+PROHIBITED DISMISSALS. For a discrete, roughly circular spot you must NOT explain it away as "sunlight reflection," "sun differential," "glare," "shadow," "uneven lighting," or "camera flash." Sunlight and shadow fall across a roof in broad gradients with soft edges â they physically cannot create a single isolated round spot a couple of inches wide surrounded by normal shingle. A discrete circular spot was made by an impact, not by light. Classify it as hail.
 
-The ONLY innocent explanation for a discrete round spot is a manufacturer color-granule blend — but a color blend has the SAME smooth, intact granule texture as the rest of the shingle; only the color differs. If the texture inside the spot is disturbed, it is hail, not a blend. When a close-up is genuinely ambiguous, classify it as hail and document the indicators in adjuster_notes.
+The ONLY innocent explanation for a discrete round spot is a manufacturer color-granule blend â but a color blend has the SAME smooth, intact granule texture as the rest of the shingle; only the color differs. If the texture inside the spot is disturbed, it is hail, not a blend. When a close-up is genuinely ambiguous, classify it as hail and document the indicators in adjuster_notes.
 
 ============================================================
-GRANULAR LOSS — DIFFERENTIAL DIAGNOSIS
+GRANULAR LOSS â DIFFERENTIAL DIAGNOSIS
 ============================================================
 
 Granular loss can come from three sources. Classify by PATTERN, not by amount:
 
-1. HAIL granular loss → LOCALIZED. Bare spots are circular or irregular but discrete, with hard edges. Surrounding shingle is intact. Often paired with mat damage at the center. → Classify as "hail".
+1. HAIL granular loss â LOCALIZED. Bare spots are circular or irregular but discrete, with hard edges. Surrounding shingle is intact. Often paired with mat damage at the center. â Classify as "hail".
 
-2. WIND granular loss → DIRECTIONAL. Streaks running with slope grain, along worn pathways, or clustered at lifted tab edges. Often paired with sealant failure or tab creases. → Classify as "wind".
+2. WIND granular loss â DIRECTIONAL. Streaks running with slope grain, along worn pathways, or clustered at lifted tab edges. Often paired with sealant failure or tab creases. â Classify as "wind".
 
-3. UV/AGE granular loss → UNIFORM. Continuous gradient of loss across the entire slope (most pronounced on south or west faces), with oxidized shingle edges, curling, and/or alligator cracking VISIBLY present in the same area. → Classify as "wear_tear" ONLY when uniformity is clearly the dominant pattern AND aging signs are co-present.
+3. UV/AGE granular loss â UNIFORM. Continuous gradient of loss across the entire slope (most pronounced on south or west faces), with oxidized shingle edges, curling, and/or alligator cracking VISIBLY present in the same area. â Classify as "wear_tear" ONLY when uniformity is clearly the dominant pattern AND aging signs are co-present.
 
 When the same slope shows BOTH localized impacts AND broader granule thinning: classify the localized impacts as "hail" and mention the underlying condition in adjuster_notes. Do not let general roof age absorb specific storm damage findings.
 
@@ -4219,18 +4219,18 @@ When the same slope shows BOTH localized impacts AND broader granule thinning: c
 OTHER CATEGORIES
 ============================================================
 
-"defect" — manufacturing issues: blistering (raised bumps from gas pockets), thermal splitting in straight lines, premature delamination, factory edge defects. Note: usually warranty, not insurance.
+"defect" â manufacturing issues: blistering (raised bumps from gas pockets), thermal splitting in straight lines, premature delamination, factory edge defects. Note: usually warranty, not insurance.
 
-"other" — flashing failures, vent boot cracks, ridge cap displacement, exposed underlayment, pipe penetration issues, gutter damage.
+"other" â flashing failures, vent boot cracks, ridge cap displacement, exposed underlayment, pipe penetration issues, gutter damage.
 
 ============================================================
 CAUSE / ORIGIN
 ============================================================
 
 For each finding, set "cause_origin":
-- "storm-related" — evidence supports a storm peril (hail, wind)
-- "non-storm" — clear evidence of age, defect, or installer error
-- "ambiguous" — genuinely unclear; describe both possibilities
+- "storm-related" â evidence supports a storm peril (hail, wind)
+- "non-storm" â clear evidence of age, defect, or installer error
+- "ambiguous" â genuinely unclear; describe both possibilities
 
 Bias: when evidence is ambiguous, prefer "ambiguous" over "non-storm". Carriers can challenge ambiguous findings, but they cannot blanket-deny them.
 
@@ -4241,22 +4241,22 @@ HAIL / WIND CONFIDENCE & CLAIM STRENGTH
 You will return three top-level fields:
 
 "hail_confidence":
-- "high" — clear circular impacts, fresh mat exposure, random distribution
-- "medium" — some indicators (e.g. localized granule loss in circular pattern) but missing fresh mat exposure or clear bruise
-- "low" — granule loss only, ambiguous pattern, single suspect spot
-- "none" — no hail indicators at all
+- "high" â clear circular impacts, fresh mat exposure, random distribution
+- "medium" â some indicators (e.g. localized granule loss in circular pattern) but missing fresh mat exposure or clear bruise
+- "low" â granule loss only, ambiguous pattern, single suspect spot
+- "none" â no hail indicators at all
 
 "wind_confidence":
-- "high" — clear shingle creasing (dark horizontal line on tab), lifted/missing tabs, broken seal strip, or multiple of these on adjacent tabs
-- "medium" — possible creasing or lifted tab visible but not definitive; one suspect tab; granule displacement at tab edges
-- "low" — minor edge granule loss, slightly raised tab, no clear crease or lift line
-- "none" — no wind indicators
+- "high" â clear shingle creasing (dark horizontal line on tab), lifted/missing tabs, broken seal strip, or multiple of these on adjacent tabs
+- "medium" â possible creasing or lifted tab visible but not definitive; one suspect tab; granule displacement at tab edges
+- "low" â minor edge granule loss, slightly raised tab, no clear crease or lift line
+- "none" â no wind indicators
 
 "claim_strength":
-- "strong" — multiple unambiguous storm-related findings of moderate or severe severity with specific cited visual indicators; OR one severe finding (missing shingle, displaced shingle, clear mat fracture) with corroborating context.
-- "moderate" — one clearly documented storm-related finding with unambiguous visual evidence.
-- "weak" — only ambiguous, "probable", or minor findings — supports further investigation but not a confident claim alone.
-- "no-claim" — no storm-related findings visible. This is the CORRECT answer for a roof in normal condition. Do not manufacture findings to avoid "no-claim".
+- "strong" â multiple unambiguous storm-related findings of moderate or severe severity with specific cited visual indicators; OR one severe finding (missing shingle, displaced shingle, clear mat fracture) with corroborating context.
+- "moderate" â one clearly documented storm-related finding with unambiguous visual evidence.
+- "weak" â only ambiguous, "probable", or minor findings â supports further investigation but not a confident claim alone.
+- "no-claim" â no storm-related findings visible. This is the CORRECT answer for a roof in normal condition. Do not manufacture findings to avoid "no-claim".
 
 Pair these honestly. A roof with NO visible damage should return "no-claim" and findings: []. Do not invent damage to be helpful. Equally, do not downgrade clear unambiguous damage just to be conservative.
 
@@ -4266,10 +4266,10 @@ EVIDENCE CITATION
 
 For every finding, include an "evidence" field: 1-2 sentences citing the SPECIFIC visual indicator that justifies the category. Example: "Granules displaced in a 1-inch circular pattern with fresh black mat exposed at center; matching impacts on adjacent shingles." This is what the adjuster cites to the carrier. Be specific.
 
-If you classify something as "wear_tear" or "defect" or "non-storm", you must explain WHY in the evidence field — what rules out storm cause. "Uniform oxidation across the slope with no localized impact pattern" is acceptable. "Looks old" is not.
+If you classify something as "wear_tear" or "defect" or "non-storm", you must explain WHY in the evidence field â what rules out storm cause. "Uniform oxidation across the slope with no localized impact pattern" is acceptable. "Looks old" is not.
 
 ============================================================
-OUTPUT — STRICT JSON, NO MARKDOWN FENCES
+OUTPUT â STRICT JSON, NO MARKDOWN FENCES
 ============================================================
 
 {
@@ -4302,7 +4302,7 @@ OUTPUT — STRICT JSON, NO MARKDOWN FENCES
 
 If the image is not a roof at all: set is_roof: false, not_roof_reason describing what the image shows, findings: [], damage_categories_present: [], overall_severity: "none", hail_confidence: "none", wind_confidence: "none", claim_strength: "no-claim", adjuster_notes: "".
 
-If the roof is in normal condition with no specific damage indicators visible: set findings: [], damage_categories_present: [], overall_severity: "none", hail_confidence: "none", wind_confidence: "none", claim_strength: "no-claim", and write a brief honest adjuster_notes (e.g. "No storm-related findings on this slope. Roof presents in normal condition."). This is a valid and expected output — many roof photos show healthy roofs.`;
+If the roof is in normal condition with no specific damage indicators visible: set findings: [], damage_categories_present: [], overall_severity: "none", hail_confidence: "none", wind_confidence: "none", claim_strength: "no-claim", and write a brief honest adjuster_notes (e.g. "No storm-related findings on this slope. Roof presents in normal condition."). This is a valid and expected output â many roof photos show healthy roofs.`;
 }
 
 // ============ Boot ============
@@ -4524,7 +4524,7 @@ app.get("/me/google/drive-token", requireAuth, async (req, res) => {
   }
 });
 
-// Disconnect — clears all Google tokens for the user.
+// Disconnect â clears all Google tokens for the user.
 app.delete('/me/google', requireAuth, async (req, res) => {
   await pool.query(
     "UPDATE users SET google_access_token = NULL, google_refresh_token = NULL, " +
@@ -4589,7 +4589,7 @@ app.get('/gmail/search', requireAuth, async (req, res) => {
   }
 });
 
-// Calendar — list events on the primary calendar.
+// Calendar â list events on the primary calendar.
 app.get('/calendar/events', requireAuth, async (req, res) => {
   try {
     const token = await googleAccessToken(req.user.id);
@@ -4612,7 +4612,7 @@ app.get('/calendar/events', requireAuth, async (req, res) => {
   }
 });
 
-// Calendar — create an event.
+// Calendar â create an event.
 app.post('/calendar/events', requireAuth, async (req, res) => {
   try {
     const token = await googleAccessToken(req.user.id);
@@ -4632,7 +4632,7 @@ app.post('/calendar/events', requireAuth, async (req, res) => {
   }
 });
 
-// Calendar — update an event.
+// Calendar â update an event.
 app.patch('/calendar/events/:id', requireAuth, async (req, res) => {
   try {
     const token = await googleAccessToken(req.user.id);
@@ -4653,7 +4653,7 @@ app.patch('/calendar/events/:id', requireAuth, async (req, res) => {
   }
 });
 
-// Calendar — delete an event.
+// Calendar â delete an event.
 app.delete('/calendar/events/:id', requireAuth, async (req, res) => {
   try {
     const token = await googleAccessToken(req.user.id);
@@ -4672,7 +4672,7 @@ app.delete('/calendar/events/:id', requireAuth, async (req, res) => {
   }
 });
 
-// ============ Partner links (PA ↔ Roofer) ============
+// ============ Partner links (PA â Roofer) ============
 // A PA and a roofer can link accounts so a roofer's 'Send Lead' form
 // auto-routes to a specific PA. Either side can generate a 6-char code;
 // the other side redeems it to create the link.
@@ -4685,7 +4685,7 @@ app.delete('/calendar/events/:id', requireAuth, async (req, res) => {
 })();
 
 // Assign one of my leads to a linked partner (PA <-> roofer) so it appears in their account too.
-// Sets the partner as creator and the caller as assignee — same shape as a partner referral, so
+// Sets the partner as creator and the caller as assignee â same shape as a partner referral, so
 // the lead is visible in BOTH accounts (creator OR assignee can see it).
 app.post('/leads/:id/assign-partner', requireAuth, async (req, res) => {
   const id = parseInt(req.params.id);
@@ -5070,7 +5070,7 @@ app.delete("/partners/lead-files/:file_id", requireAuth, async (req, res) => {
 });
 
 
-// POST /partners/lead-with-files — atomic create-lead + upload-files in one call. Returns lead_id + file_ids.
+// POST /partners/lead-with-files â atomic create-lead + upload-files in one call. Returns lead_id + file_ids.
 app.post("/partners/lead-with-files", requireAuth, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -5124,7 +5124,7 @@ app.post("/partners/lead-with-files", requireAuth, async (req, res) => {
 });
 
 // ============================================================
-// User cloud backup — automatic per-user snapshot of claim data
+// User cloud backup â automatic per-user snapshot of claim data
 // PUT /user/backup, GET /user/backup, GET /user/backup/meta
 // Frontend strips photos before pushing so payload stays small.
 // ============================================================
@@ -5183,7 +5183,7 @@ app.get("/user/backup/meta", requireAuth, async (req, res) => {
 });
 
 // ============================================================
-// PA → Roofer status sync
+// PA â Roofer status sync
 // PA pushes their current pipeline stage for each claim that came from a roofer-lead.
 // Roofer polls back the latest stages for all leads they have sent.
 // ============================================================
@@ -5196,7 +5196,7 @@ async function _ensureLeadPaStatusesTable() {
   _leadPaStatusesEnsured = true;
 }
 
-// POST /partners/lead-status — PA pushes the current pipeline stage for one of their claims
+// POST /partners/lead-status â PA pushes the current pipeline stage for one of their claims
 // Body: { lead_id, stage }
 app.post("/partners/lead-status", requireAuth, async (req, res) => {
   try {
@@ -5220,7 +5220,7 @@ app.post("/partners/lead-status", requireAuth, async (req, res) => {
   }
 });
 
-// GET /partners/sent-statuses — roofer pulls the current PA stage for every lead they sent
+// GET /partners/sent-statuses â roofer pulls the current PA stage for every lead they sent
 app.get("/partners/sent-statuses", requireAuth, async (req, res) => {
   try {
     await _ensureLeadPaStatusesTable();
@@ -5249,8 +5249,3 @@ app.get("/partners/sent-statuses", requireAuth, async (req, res) => {
 }
 
 boot();
-
- Claude is active in this tab group  
-Open chat
- 
-Dismiss
