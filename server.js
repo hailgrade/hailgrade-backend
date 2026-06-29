@@ -1182,6 +1182,96 @@ app.post('/emails/:msgId/draft-reply', requireAuth, async (req, res) => {
   }
 });
 
+// POST /emails/summarize-claim — Claude summarizes where a claim stands from its emails
+app.post('/emails/summarize-claim', requireAuth, async (req, res) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'no_api_key' });
+    const reqBody = req.body || {};
+    const claim = (reqBody.claim && typeof reqBody.claim === 'object') ? reqBody.claim : {};
+    let emails = Array.isArray(reqBody.emails) ? reqBody.emails : [];
+    if (!emails.length) return res.status(400).json({ error: 'no_emails' });
+    // Keep the prompt bounded
+    emails = emails.slice(0, 80);
+
+    // Readable claim-context block (omit blanks)
+    const labels = {
+      insured: 'Insured', address: 'Property address', claim_number: 'Claim #',
+      policy_number: 'Policy #', carrier: 'Carrier', date_of_loss: 'Date of loss',
+      status: 'Phase', desk_adjuster: 'Desk adjuster', field_adjuster: 'Field adjuster',
+      demand: 'Demand', offer: 'Carrier offer', rcv: 'RCV', acv: 'ACV',
+      pa_firm: 'PA firm', pa_name: 'PA name'
+    };
+    let claimCtx = Object.keys(labels).map(function (k) {
+      const v = claim[k];
+      if (v === null || v === undefined || v === '') return null;
+      return labels[k] + ': ' + v;
+    }).filter(Boolean).join('\n');
+    if (!claimCtx) claimCtx = '(no extra claim details provided)';
+
+    // Oldest -> newest so the model sees the trajectory
+    const sorted = emails.slice().sort(function (a, b) {
+      return (Date.parse(a.date || a.date_iso || 0) || 0) - (Date.parse(b.date || b.date_iso || 0) || 0);
+    });
+    const emailText = sorted.map(function (e, i) {
+      const d = (e.date || e.date_iso || '').toString().slice(0, 25);
+      const snip = (e.snippet || '').toString().slice(0, 400);
+      return (i + 1) + '. [' + d + '] From: ' + (e.from || '') + ' | Subject: ' + (e.subject || '') + '\n   ' + snip;
+    }).join('\n');
+
+    const systemPrompt = [
+      "You are a public adjuster's assistant. Based ONLY on the email correspondence below for a single insurance claim, write a brief STATUS SNAPSHOT of where the claim stands today, from the public adjuster's point of view.",
+      '',
+      'Write plain text. Use these short labeled lines, in this order, and include a line only if the emails support it:',
+      'Status: one sentence on where things stand right now.',
+      'Latest from carrier: the most recent offer, decision, request, or position from the insurance company.',
+      'Outstanding: what still needs to happen or be sent.',
+      'Waiting on: who the ball is with right now (carrier, insured, public adjuster, or roofer).',
+      'Next step: the single most useful action for the public adjuster to take next.',
+      '',
+      'Rules: Be concise (aim for under 150 words total). Do NOT invent facts that are not in the emails. If the emails are thin or unclear on a point, say so briefly rather than guessing. Reference the claim by claim number or insured name when helpful. No markdown headers, no bullet characters — just the labeled lines above.'
+    ].join('\n');
+
+    const userContent = [
+      'CLAIM CONTEXT:',
+      claimCtx,
+      '',
+      'EMAIL CORRESPONDENCE (oldest to newest; each is date, sender, subject, then a snippet):',
+      emailText
+    ].join('\n');
+
+    const aResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1200,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userContent }]
+      })
+    });
+    if (!aResp.ok) {
+      const errTxt = await aResp.text();
+      return res.status(500).json({ error: 'anthropic_error', message: errTxt.slice(0, 300) });
+    }
+    const aData = await aResp.json();
+    let summary = (aData.content && aData.content[0] && aData.content[0].text) || '';
+    summary = String(summary).trim();
+    if (summary.startsWith('```')) {
+      summary = summary.replace(/^```(?:[a-z]*)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    }
+    if (!summary) return res.status(500).json({ error: 'empty_summary' });
+    return res.json({ summary: summary, email_count: sorted.length });
+  } catch (err) {
+    console.error('[/emails/summarize-claim]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
+
 
 
 app.post('/events', requireAuth, async (req, res) => {
