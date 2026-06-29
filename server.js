@@ -1069,6 +1069,120 @@ ${body}
   }
 });
 
+// POST /emails/:msgId/draft-reply — Claude reads the email + claim and writes a PA reply
+app.post('/emails/:msgId/draft-reply', requireAuth, async (req, res) => {
+  try {
+    const accessToken = await _ampleGoogleToken(req.user.id);
+    if (!accessToken) return res.status(401).json({ error: 'not_connected' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'no_api_key' });
+    const msgId = String(req.params.msgId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!msgId) return res.status(400).json({ error: 'bad_msg_id' });
+
+    const reqBody = req.body || {};
+    const intent = String(reqBody.intent || 'general');
+    const instruction = String(reqBody.instruction || '').slice(0, 4000);
+    const claim = (reqBody.claim && typeof reqBody.claim === 'object') ? reqBody.claim : {};
+
+    // Fetch the email being replied to
+    const mResp = await fetch(
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + msgId + '?format=full',
+      { headers: { authorization: 'Bearer ' + accessToken } }
+    );
+    if (!mResp.ok) return res.status(500).json({ error: 'gmail_fetch_failed', status: mResp.status });
+    const m = await mResp.json();
+    const headers = (m.payload && m.payload.headers) || [];
+    const parts = { text: '', html: '', attachments: [] };
+    _extractParts(m.payload || {}, parts);
+    let emailBody = parts.text;
+    if (!emailBody && parts.html) emailBody = parts.html.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!emailBody) emailBody = m.snippet || '';
+    if (emailBody.length > 12000) emailBody = emailBody.slice(0, 12000) + '\n\n[...truncated]';
+    const subject = _headerVal(headers, 'Subject');
+    const from = _headerVal(headers, 'From');
+
+    // Build a readable claim-context block (omit blanks)
+    const labels = {
+      insured: 'Insured', address: 'Property address', claim_number: 'Claim #',
+      policy_number: 'Policy #', carrier: 'Carrier', date_of_loss: 'Date of loss',
+      status: 'Claim status', desk_adjuster: 'Desk adjuster', field_adjuster: 'Field adjuster',
+      demand: 'Demand', offer: 'Carrier offer', rcv: 'RCV', acv: 'ACV',
+      pa_firm: 'PA firm', pa_name: 'PA name', pa_phone: 'PA phone', pa_email: 'PA email', pa_license: 'PA license #'
+    };
+    let claimCtx = Object.keys(labels).map(function (k) {
+      const v = claim[k];
+      if (v === null || v === undefined || v === '') return null;
+      return labels[k] + ': ' + v;
+    }).filter(Boolean).join('\n');
+    if (!claimCtx) claimCtx = '(no extra claim details provided)';
+
+    const intentGuide = [
+      '- general: Read the incoming email and respond appropriately as the PA.',
+      '- acknowledge: Confirm receipt, restate what was received, and state the next step and expected timeline.',
+      '- pushback: Politely but firmly dispute a low or insufficient offer or denial. Cite the documented scope/estimate (and the demand figure if provided), and request the carrier revisit. Do not accept the offer.',
+      '- inspection: Request to schedule a reinspection of the property; offer to coordinate access and propose that they send availability.',
+      '- documents: A short cover note stating which documents are attached or being sent and inviting the adjuster to confirm receipt.'
+    ].join('\n');
+
+    const systemPrompt = [
+      'You are drafting an email reply on behalf of a PUBLIC ADJUSTER (PA) who represents the policyholder against the insurance carrier. Write ONLY the body of the reply, in plain text, ready to send. No subject line, no markdown, no preamble, no placeholders in brackets — use the claim details provided to fill specifics. If a detail is unknown, write naturally around it rather than inventing it.',
+      '',
+      "VOICE: professional, courteous, and firm. You advocate for the policyholder. Be concise and businesslike. Never concede the carrier's position; keep the claim moving toward full payment. Sign off with the PA's name, firm, and phone if given.",
+      '',
+      'Reference the claim by claim number, insured, or property address when relevant so the reply reads as specific to this file.',
+      '',
+      "If an INSTRUCTION is provided, treat it as the PA's direct guidance for what the reply should say and follow it closely (still in the professional PA voice). If it is empty, read the incoming email and write the reply you judge appropriate.",
+      '',
+      'INTENT-specific guidance:',
+      intentGuide
+    ].join('\n');
+
+    const userContent = [
+      'INTENT: ' + intent,
+      'INSTRUCTION: ' + (instruction || '(none — decide based on the email)'),
+      '',
+      'CLAIM CONTEXT:',
+      claimCtx,
+      '',
+      'EMAIL YOU ARE REPLYING TO:',
+      'From: ' + from,
+      'Subject: ' + subject,
+      '',
+      emailBody
+    ].join('\n');
+
+    const aResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1500,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userContent }]
+      })
+    });
+    if (!aResp.ok) {
+      const errTxt = await aResp.text();
+      return res.status(500).json({ error: 'anthropic_error', message: errTxt.slice(0, 300) });
+    }
+    const aData = await aResp.json();
+    let reply = (aData.content && aData.content[0] && aData.content[0].text) || '';
+    reply = String(reply).trim();
+    if (reply.startsWith('```')) {
+      reply = reply.replace(/^```(?:[a-z]*)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    }
+    if (!reply) return res.status(500).json({ error: 'empty_reply' });
+    return res.json({ reply: reply });
+  } catch (err) {
+    console.error('[/emails/:msgId/draft-reply]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
+
 
 app.post('/events', requireAuth, async (req, res) => {
   // Google Calendar sync: if the user has Google connected, create the event on Google
