@@ -1994,8 +1994,8 @@ app.delete('/claims/:localId', requireAuth, async (req, res) => {
 
 app.post('/policy/extract', requireAuth, async (req, res) => {
   try {
-    const { image_base64, media_type, pdf_base64, filename, claim_local_id } = req.body || {};
-    if (!image_base64 && !pdf_base64) {
+    const { image_base64, media_type, pdf_base64, text, filename, claim_local_id } = req.body || {};
+    if (!image_base64 && !pdf_base64 && !text) {
       return res.status(400).json({ error: 'missing_input', message: 'image_base64 or pdf_base64 required' });
     }
     if (!process.env.ANTHROPIC_API_KEY) {
@@ -2004,7 +2004,9 @@ app.post('/policy/extract', requireAuth, async (req, res) => {
 
     // Build the Claude message Ã¢ÂÂ image OR PDF (document) block, plus the extraction prompt
     const content = [];
-    if (pdf_base64) {
+    if (text) {
+      content.push({ type: 'text', text: 'POLICY TEXT extracted from the PDF in the browser (Declarations page first; sections mentioning appraisal, searched across the entire policy, follow):' + String.fromCharCode(10, 10) + String(text).slice(0, 60000) });
+    } else if (pdf_base64) {
       content.push({
         type: 'document',
         source: { type: 'base64', media_type: 'application/pdf', data: pdf_base64 }
