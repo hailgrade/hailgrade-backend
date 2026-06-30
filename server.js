@@ -1271,6 +1271,163 @@ app.post('/emails/summarize-claim', requireAuth, async (req, res) => {
   }
 });
 
+// POST /claim/work — the in-claim AI assistant. Reads the email trail + claim, and returns a
+// structured "work-up": status, recommended phase, missing fields it found values for, attachments
+// to import, repeated sticking points, a draft reply for approval, and suggested next steps.
+app.post('/claim/work', requireAuth, async (req, res) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'no_api_key' });
+    const reqBody = req.body || {};
+    const claim = (reqBody.claim && typeof reqBody.claim === 'object') ? reqBody.claim : {};
+    let emails = Array.isArray(reqBody.emails) ? reqBody.emails : [];
+    emails = emails.slice(0, 60);
+
+    // Pull full bodies for the most recent few emails — needed to extract precise missing
+    // values, read the back-and-forth, and draft a sensible reply.
+    var bodies = [];
+    try {
+      var accessToken = await _ampleGoogleToken(req.user.id);
+      if (accessToken) {
+        var sorted = emails.slice().sort(function (a, b) {
+          return (Date.parse(b.date || b.date_iso || 0) || 0) - (Date.parse(a.date || a.date_iso || 0) || 0);
+        });
+        var recent = sorted.slice(0, 7).filter(function (e) { return e && e.id; });
+        for (var k = 0; k < recent.length; k++) {
+          try {
+            var e = recent[k];
+            var mid = String(e.id).replace(/[^a-zA-Z0-9_-]/g, '');
+            var mResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/' + mid + '?format=full', { headers: { authorization: 'Bearer ' + accessToken } });
+            if (!mResp.ok) continue;
+            var m = await mResp.json();
+            var parts = { text: '', html: '', attachments: [] };
+            _extractParts(m.payload || {}, parts);
+            var b = parts.text || (parts.html ? parts.html.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '') || m.snippet || '';
+            if (b.length > 4000) b = b.slice(0, 4000) + ' [...]';
+            bodies.push({ id: e.id, subject: e.subject || '', from: e.from || '', date: e.date || e.date_iso || '', body: b });
+          } catch (e2) {}
+        }
+      }
+    } catch (e) {}
+
+    // Claim context — show current values AND flag which fields are blank so the model only
+    // fills the gaps.
+    var fieldLabels = {
+      insured: 'Insured', address: 'Property address', claim_number: 'Claim #', policy_number: 'Policy #',
+      carrier: 'Carrier', date_of_loss: 'Date of loss', deductible: 'Deductible', desk_adjuster: 'Desk adjuster',
+      desk_adjuster_email: 'Desk adjuster email', desk_adjuster_phone: 'Desk adjuster phone',
+      field_adjuster: 'Field adjuster', demand: 'Demand', offer: 'Carrier offer', rcv: 'RCV', acv: 'ACV',
+      date_inspected: 'Date inspected'
+    };
+    var ctxLines = [], missingList = [];
+    Object.keys(fieldLabels).forEach(function (key) {
+      var v = claim[key];
+      var has = !(v === null || v === undefined || v === '');
+      ctxLines.push(fieldLabels[key] + ': ' + (has ? v : '(MISSING)'));
+      if (!has) missingList.push(key);
+    });
+    var claimCtx = ctxLines.join('\n');
+    var currentPhase = String(claim.phase || claim.status || 'unknown');
+
+    var phaseList = [
+      'pre-inspection — preparing for the inspection',
+      'lor — LOR sent, awaiting client signature',
+      'inspection — carrier adjuster inspection scheduled / done',
+      'estimate — building or reviewing the estimate',
+      'negotiation — back-and-forth with the carrier on the offer',
+      'initial-pay — first/ACV check received',
+      'partial — underpaid, still owed more',
+      'dispute — disputing a partial denial',
+      'appraisal — formal appraisal process',
+      'denial — denied / handed to attorney',
+      'closed — paid and complete'
+    ].join('\n');
+
+    var sortedAll = emails.slice().sort(function (a, b) {
+      return (Date.parse(a.date || a.date_iso || 0) || 0) - (Date.parse(b.date || b.date_iso || 0) || 0);
+    });
+    var emailTimeline = sortedAll.map(function (e, i) {
+      var d = (e.date || e.date_iso || '').toString().slice(0, 16);
+      var att = (e.has_attachments || e.hasAttachments) ? ' [HAS ATTACHMENTS, gmailId=' + (e.id || '') + ']' : '';
+      return (i + 1) + '. [' + d + '] From: ' + (e.from || '') + ' | ' + (e.subject || '') + att + '\n   ' + (e.snippet || '').toString().slice(0, 220);
+    }).join('\n');
+    var fullBodies = bodies.map(function (b) {
+      return '--- EMAIL (' + (b.date || '').toString().slice(0, 16) + ') From: ' + b.from + ' | Subject: ' + b.subject + ' ---\n' + b.body;
+    }).join('\n\n');
+
+    var systemPrompt = [
+      "You are a senior public adjuster's assistant working a single insurance claim. Read the claim data and the full email trail, then produce a concrete work-up that does as much of the work as possible. You advocate for the policyholder against the carrier.",
+      '',
+      'Return ONLY a JSON object with EXACTLY these keys:',
+      '{',
+      '  "status": "2-3 sentence plain-English read on exactly where this claim stands right now",',
+      '  "recommendedPhase": { "id": "one of the phase ids below, or null if the current phase is right", "label": "the phase label", "reason": "why, citing the emails", "confidence": "high | medium | low" },',
+      '  "filledFields": [ { "field": "one of: claim_number, policy_number, carrier, date_of_loss, deductible, desk_adjuster, desk_adjuster_email, desk_adjuster_phone, field_adjuster, offer, demand, date_inspected", "value": "the value found in the emails (numbers as digits only for money)", "source": "short quote or subject of the email it came from" } ],',
+      '  "stickingPoints": [ { "topic": "the disputed point (e.g. roof depreciation, scope of damage)", "count": "how many separate emails went back and forth on it (integer)", "suggestion": "what to do about it, e.g. invoke appraisal if it has stalled" } ],',
+      '  "draftEmail": { "needed": true/false, "to": "recipient email if known", "subject": "Re: ... subject line", "body": "a complete, ready-to-send plain-text reply or follow-up in a firm professional PA voice, no placeholders", "why": "one line on what this email accomplishes" },',
+      '  "nextSteps": [ "short imperative action items, most important first (max 5)" ]',
+      '}',
+      '',
+      'PHASES (use the id on the left for recommendedPhase.id):',
+      phaseList,
+      '',
+      'RULES:',
+      '- filledFields: ONLY include fields that are currently (MISSING) in the claim data AND whose value you can find in the emails. Never guess. Money values are digits only (no $ or commas).',
+      '- recommendedPhase: base it on the emails. If they have argued the SAME point many times with no movement, recommend "appraisal" or "dispute". If a check arrived, recommend "initial-pay" or "partial". If the current phase already fits, set id to null.',
+      '- stickingPoints: only list a point if it genuinely recurs (count >= 2). Empty array if none.',
+      '- draftEmail: set needed=true only if an outgoing email is clearly the right next move (e.g., the carrier is waiting on the PA, or a follow-up is overdue). Write the full body. If nothing needs sending, set needed=false and leave the other fields null.',
+      '- Output ONLY the JSON object. No markdown, no code fences, no commentary.'
+    ].join('\n');
+
+    var userContent = [
+      'CLAIM DATA (fields marked (MISSING) are blank and you may fill from the emails):',
+      claimCtx,
+      'Current phase: ' + currentPhase,
+      '',
+      'EMAIL TIMELINE (oldest to newest; snippets):',
+      emailTimeline || '(no emails)',
+      '',
+      'MOST RECENT EMAILS (full text, for accurate detail + drafting):',
+      fullBodies || '(none fetched)'
+    ].join('\n');
+
+    var aResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2600,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userContent }]
+      })
+    });
+    if (!aResp.ok) {
+      var errTxt = await aResp.text();
+      return res.status(500).json({ error: 'anthropic_error', message: errTxt.slice(0, 300) });
+    }
+    var aData = await aResp.json();
+    var raw = (aData.content && aData.content[0] && aData.content[0].text) || '';
+    var cleaned = String(raw).trim();
+    if (cleaned.startsWith('```')) cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    var work = null;
+    try { work = JSON.parse(cleaned); } catch (e) {
+      var mm = cleaned.match(/\{[\s\S]*\}/);
+      if (mm) { try { work = JSON.parse(mm[0]); } catch (e2) {} }
+    }
+    if (!work || typeof work !== 'object') return res.status(500).json({ error: 'parse_failed', raw: cleaned.slice(0, 300) });
+    work.bodiesFetched = bodies.length;
+    work.emailCount = emails.length;
+    return res.json(work);
+  } catch (err) {
+    console.error('[/claim/work]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
+
 
 
 
