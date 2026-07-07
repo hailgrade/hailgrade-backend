@@ -1358,7 +1358,7 @@ app.post('/claim/work', requireAuth, async (req, res) => {
     }).join('\n\n');
 
     var systemPrompt = [
-      "You are a senior public adjuster's assistant working a single insurance claim. Read the claim data and the full email trail, then produce a concrete work-up that does as much of the work as possible. Your job is to get the policyholder the most money possible. Read the claim data, the MONEY/settlement position, OUR estimate, the adjuster instruction, and the full email trail, then produce a concrete work-up that does as much of the work as possible. You advocate hard for the policyholder against the carrier.",
+      "You are a senior public adjuster's assistant working a single insurance claim. Read the claim data and the full email trail, then produce a concrete work-up that does as much of the work as possible. Your job is to get the policyholder the most money possible. Read the claim data, the MONEY/settlement position, OUR estimate, the adjuster instruction, and the full email trail, then produce a concrete work-up that does as much of the work as possible. You advocate hard for the policyholder against the carrier. CRITICAL DISTINCTION: the MONEY / SETTLEMENT POSITION section holds the CARRIER's estimate and offers (their numbers, entered in Demands). OUR estimate is a SEPARATE document shown under OUR ESTIMATE (in our files). Never confuse the two. If a carrier estimate/offer is listed in the MONEY section, the carrier DID send their estimate - never say they did not. If OUR ESTIMATE says none was found, we simply have not uploaded ours yet.",
       '',
       'Return ONLY a JSON object with EXACTLY these keys:',
       '{',
@@ -1387,7 +1387,7 @@ app.post('/claim/work', requireAuth, async (req, res) => {
       if (money.demand != null) moneyLines.push('Our demand on file: $' + money.demand);
       if (money.deductible != null) moneyLines.push('Deductible: $' + money.deductible);
       if (Array.isArray(money.offers) && money.offers.length) {
-        moneyLines.push('Carrier offers / settlements recorded:');
+        moneyLines.push('CARRIER estimate(s) / offer(s) - THEIR numbers, entered in the Demands section (these are what the insurance company says, NOT our estimate):');
         money.offers.forEach(function (o) {
           moneyLines.push('  - ' + (o.desc || 'offer') + ': total $' + (o.total != null ? o.total : '?') + (o.rcv != null ? (', RCV $' + o.rcv) : '') + (o.acv != null ? (', ACV $' + o.acv) : '') + (o.recovDep != null ? (', recoverable depreciation $' + o.recovDep) : '') + (o.status ? (' [' + o.status + ']') : '') + (o.date ? (' on ' + o.date) : ''));
         });
@@ -1396,7 +1396,7 @@ app.post('/claim/work', requireAuth, async (req, res) => {
       if (money.gap != null) moneyLines.push('GAP we are fighting for (our demand minus their best): $' + money.gap);
     }
     var moneySummary = moneyLines.length ? moneyLines.join(String.fromCharCode(10)) : '(no demand or carrier offers recorded on the claim yet)';
-    var estimateSummary = (estimate && estimate.text) ? ('OUR ESTIMATE on file (' + (estimate.name || 'estimate') + ') - this is the scope and pricing we submitted:' + String.fromCharCode(10) + String(estimate.text).slice(0, 7000)) : (estimate && estimate.name ? ('Our estimate on file: ' + estimate.name + ' (text not extractable).') : '(no PA estimate document found on the claim)');
+    var estimateSummary = (estimate && estimate.text) ? ('OUR ESTIMATE on file (' + (estimate.name || 'estimate') + ') - this is the scope and pricing we submitted:' + String.fromCharCode(10) + String(estimate.text).slice(0, 7000)) : (estimate && estimate.name ? ('Our estimate on file: ' + estimate.name + ' (text not extractable).') : '(we have NOT uploaded our own estimate yet - the numbers in the MONEY section above are the CARRIER estimate/offer, NOT ours)');
     var userContent = [
       'CLAIM DATA (fields marked (MISSING) are blank and you may fill from the emails):',
       claimCtx,
