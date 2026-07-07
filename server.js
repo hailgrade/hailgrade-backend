@@ -2058,7 +2058,8 @@ app.post('/estimate/extract', requireAuth, async (req, res) => {
 
 Return ONLY a JSON object with these keys (use null when a value is not clearly shown):
 {
-  "document_type": "one of: carrier_estimate, adjuster_estimate, contractor_estimate, payment_letter, supplement, other",
+  "document_type": "one of: carrier_estimate, adjuster_estimate, contractor_estimate, payment_letter, denial, partial_denial, supplement, other",
+  "denial_reason": "if document_type is denial or partial_denial, a short plain-English reason the carrier gave for denying the claim (else null)",
   "carrier": "insurance company name if shown, else null",
   "claim_number": "claim number if shown, else null",
   "date": "document date as YYYY-MM-DD if shown, else null",
