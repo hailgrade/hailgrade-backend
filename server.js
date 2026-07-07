@@ -1281,6 +1281,9 @@ app.post('/claim/work', requireAuth, async (req, res) => {
     const claim = (reqBody.claim && typeof reqBody.claim === 'object') ? reqBody.claim : {};
     let emails = Array.isArray(reqBody.emails) ? reqBody.emails : [];
     emails = emails.slice(0, 60);
+    var instruction = (reqBody.instruction && typeof reqBody.instruction === 'string') ? reqBody.instruction.trim().slice(0, 1000) : '';
+    var money = (reqBody.money && typeof reqBody.money === 'object') ? reqBody.money : null;
+    var estimate = (reqBody.estimate && typeof reqBody.estimate === 'object') ? reqBody.estimate : null;
 
     // Pull full bodies for the most recent few emails — needed to extract precise missing
     // values, read the back-and-forth, and draft a sensible reply.
@@ -1355,7 +1358,7 @@ app.post('/claim/work', requireAuth, async (req, res) => {
     }).join('\n\n');
 
     var systemPrompt = [
-      "You are a senior public adjuster's assistant working a single insurance claim. Read the claim data and the full email trail, then produce a concrete work-up that does as much of the work as possible. You advocate for the policyholder against the carrier.",
+      "You are a senior public adjuster's assistant working a single insurance claim. Read the claim data and the full email trail, then produce a concrete work-up that does as much of the work as possible. Your job is to get the policyholder the most money possible. Read the claim data, the MONEY/settlement position, OUR estimate, the adjuster instruction, and the full email trail, then produce a concrete work-up that does as much of the work as possible. You advocate hard for the policyholder against the carrier.",
       '',
       'Return ONLY a JSON object with EXACTLY these keys:',
       '{',
@@ -1374,14 +1377,37 @@ app.post('/claim/work', requireAuth, async (req, res) => {
       '- filledFields: ONLY include fields that are currently (MISSING) in the claim data AND whose value you can find in the emails. Never guess. Money values are digits only (no $ or commas).',
       '- recommendedPhase: base it on the emails. If they have argued the SAME point many times with no movement, recommend "appraisal" or "dispute". If a check arrived, recommend "initial-pay" or "partial". If the current phase already fits, set id to null.',
       '- stickingPoints: only list a point if it genuinely recurs (count >= 2). Empty array if none.',
-      '- draftEmail: set needed=true only if an outgoing email is clearly the right next move (e.g., the carrier is waiting on the PA, or a follow-up is overdue). Write the full body. If nothing needs sending, set needed=false and leave the other fields null.',
+      '- draftEmail: THIS is where the money is won. If there is a GAP between our demand and the carrier best number, the email MUST cite our demand figure and their number and make a specific, firm counter, using OUR estimate scope/total as the basis. If the adjuster gave an instruction, the email MUST carry it out. If we have not made a demand yet and our estimate supports one, draft it with the real total. Write the full ready-to-send body with real numbers and no placeholders. Set needed=false only if nothing is truly actionable.',
+      '- Ground the status, next steps and email in the ACTUAL numbers (our demand, our estimate total, their offer, the gap) and in what OUR estimate says. Never ignore a gap in the carrier favor.',
       '- Output ONLY the JSON object. No markdown, no code fences, no commentary.'
     ].join('\n');
 
+    var moneyLines = [];
+    if (money) {
+      if (money.demand != null) moneyLines.push('Our demand on file: $' + money.demand);
+      if (money.deductible != null) moneyLines.push('Deductible: $' + money.deductible);
+      if (Array.isArray(money.offers) && money.offers.length) {
+        moneyLines.push('Carrier offers / settlements recorded:');
+        money.offers.forEach(function (o) {
+          moneyLines.push('  - ' + (o.desc || 'offer') + ': total $' + (o.total != null ? o.total : '?') + (o.rcv != null ? (', RCV $' + o.rcv) : '') + (o.acv != null ? (', ACV $' + o.acv) : '') + (o.recovDep != null ? (', recoverable depreciation $' + o.recovDep) : '') + (o.status ? (' [' + o.status + ']') : '') + (o.date ? (' on ' + o.date) : ''));
+        });
+      }
+      if (money.carrierBest != null) moneyLines.push('Carrier best number so far: $' + money.carrierBest);
+      if (money.gap != null) moneyLines.push('GAP we are fighting for (our demand minus their best): $' + money.gap);
+    }
+    var moneySummary = moneyLines.length ? moneyLines.join(String.fromCharCode(10)) : '(no demand or carrier offers recorded on the claim yet)';
+    var estimateSummary = (estimate && estimate.text) ? ('OUR ESTIMATE on file (' + (estimate.name || 'estimate') + ') - this is the scope and pricing we submitted:' + String.fromCharCode(10) + String(estimate.text).slice(0, 7000)) : (estimate && estimate.name ? ('Our estimate on file: ' + estimate.name + ' (text not extractable).') : '(no PA estimate document found on the claim)');
     var userContent = [
       'CLAIM DATA (fields marked (MISSING) are blank and you may fill from the emails):',
       claimCtx,
       'Current phase: ' + currentPhase,
+      '',
+      'MONEY / SETTLEMENT POSITION:',
+      moneySummary,
+      '',
+      estimateSummary,
+      '',
+      (instruction ? ('WHAT THE ADJUSTER WANTS YOU TO DO (top priority - follow this): ' + instruction) : 'No specific instruction was given - use your judgment to advance the claim and get the client more money.'),
       '',
       'EMAIL TIMELINE (oldest to newest; snippets):',
       emailTimeline || '(no emails)',
