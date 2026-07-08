@@ -2245,6 +2245,7 @@ Return ONLY a JSON object with these keys (use null when a field is not clearly 
   "coverageC": "Contents/Coverage C limit, number only",
   "coverageD": "Loss of Use/Coverage D limit, number only",
   "deductible": "AOP deductible as number only (prefer AOP over wind/hail if split)",
+    "hurricaneDeductible": "Named-storm / hurricane / windstorm / wind-hail deductible. If the dec page states it as a fixed dollar amount, return that number only. If it is stated as a percentage of the Coverage A / dwelling limit (e.g. 2% or 5%), return the percentage as a string like \"2%\". Return null if there is no separate storm deductible.",
   "dateOfLoss": "date of loss if shown, YYYY-MM-DD",
   "appraisal": {
     "available": "true if an appraisal provision is present, false if explicitly excluded/removed, null if you cannot tell from this document",
