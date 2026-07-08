@@ -1082,6 +1082,15 @@ app.post('/emails/:msgId/draft-reply', requireAuth, async (req, res) => {
     const intent = String(reqBody.intent || 'general');
     const instruction = String(reqBody.instruction || '').slice(0, 4000);
     var _replyFiles = Array.isArray(reqBody.files) ? reqBody.files : [];
+    var _money = (reqBody.money && typeof reqBody.money === 'object') ? reqBody.money : null;
+    var _mLines = [];
+    if (_money) {
+      if (_money.demand != null) _mLines.push('OUR DEMAND = the full amount WE are pursuing from the carrier (what they still owe). This is NOT what the carrier has paid: $' + _money.demand);
+      if (_money.deductible != null) _mLines.push('Policy deductible on our record: $' + _money.deductible);
+      if (_money.carrierBest != null) _mLines.push('What the CARRIER has actually offered/paid so far (their number): $' + _money.carrierBest);
+      if (_money.gap != null) _mLines.push('Amount still owed = our demand minus their number: $' + _money.gap);
+    }
+    var _moneyBlock = _mLines.length ? ('MONEY POSITION (authoritative, from OUR file - trust these figures over any conflicting number inside the carrier documents; never say the carrier has already paid our demand, and never quote a deductible from their letter if it differs from our record):' + String.fromCharCode(10) + _mLines.join(String.fromCharCode(10))) : '';
     var _fbParts = [];
     _replyFiles.slice(0, 6).forEach(function (f) {
       if (!f) return;
@@ -1149,6 +1158,7 @@ app.post('/emails/:msgId/draft-reply', requireAuth, async (req, res) => {
     const userContent = [
       'INTENT: ' + intent,
       'INSTRUCTION: ' + (instruction || '(none — decide based on the email)'),
+      _moneyBlock,
       _filesBlock,
       '',
       'CLAIM CONTEXT:',
