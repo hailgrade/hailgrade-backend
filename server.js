@@ -1081,6 +1081,16 @@ app.post('/emails/:msgId/draft-reply', requireAuth, async (req, res) => {
     const reqBody = req.body || {};
     const intent = String(reqBody.intent || 'general');
     const instruction = String(reqBody.instruction || '').slice(0, 4000);
+    var _replyFiles = Array.isArray(reqBody.files) ? reqBody.files : [];
+    var _fbParts = [];
+    _replyFiles.slice(0, 6).forEach(function (f) {
+      if (!f) return;
+      var nm = String(f.name || 'document').slice(0, 120);
+      var role = f.role ? (' [' + String(f.role).slice(0, 40) + ']') : '';
+      var txt = String(f.text || '').slice(0, 7000);
+      if (txt.trim()) _fbParts.push('--- ' + nm + role + ' ---' + String.fromCharCode(10) + txt);
+    });
+    var _filesBlock = _fbParts.length ? ('SUPPORTING DOCUMENTS the adjuster selected for this reply - read these carefully and ground the reply in them (quote figures and language where useful):' + String.fromCharCode(10) + _fbParts.join(String.fromCharCode(10, 10))) : 'No supporting documents were selected.';
     const claim = (reqBody.claim && typeof reqBody.claim === 'object') ? reqBody.claim : {};
 
     // Fetch the email being replied to
@@ -1139,6 +1149,7 @@ app.post('/emails/:msgId/draft-reply', requireAuth, async (req, res) => {
     const userContent = [
       'INTENT: ' + intent,
       'INSTRUCTION: ' + (instruction || '(none — decide based on the email)'),
+      _filesBlock,
       '',
       'CLAIM CONTEXT:',
       claimCtx,
