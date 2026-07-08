@@ -1086,6 +1086,7 @@ app.post('/emails/:msgId/draft-reply', requireAuth, async (req, res) => {
     var _mLines = [];
     if (_money) {
       if (_money.demand != null) _mLines.push('OUR DEMAND = the full amount WE are pursuing from the carrier (what they still owe). This is NOT what the carrier has paid: $' + _money.demand);
+      if (_money.counter != null) _mLines.push('COUNTER OFFER = the number WE are willing to settle for right now, which is below our full demand. If the user wants to counter or settle, propose THIS figure and cite our full demand as the justification / anchor: $' + _money.counter);
       if (_money.deductible != null) _mLines.push('Policy deductible on our record: $' + _money.deductible);
       if (_money.carrierBest != null) _mLines.push('What the CARRIER has actually offered/paid so far (their number): $' + _money.carrierBest);
       if (_money.gap != null) _mLines.push('Amount still owed = our demand minus their number: $' + _money.gap);
