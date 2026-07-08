@@ -4195,7 +4195,8 @@ app.post("/roof/measure", requireAuth, async (req, res) => {
     }
     const sp = j.solarPotential || {};
     const stats = sp.wholeRoofStats || {};
-    const areaM2 = Number(stats.areaMeters2 || 0);
+    let areaM2 = Number(stats.areaMeters2 || 0);
+    try { const _segSum = (Array.isArray(sp.roofSegmentStats) ? sp.roofSegmentStats : []).reduce(function(a, s){ return a + Number((s && s.stats && s.stats.areaMeters2) || 0); }, 0); if (_segSum > areaM2) areaM2 = _segSum; } catch (e) {}
     if (!areaM2) return res.status(404).json({ error: "No roof area found for this property" });
     const sqft = areaM2 * 10.76391;
     const segments = Array.isArray(sp.roofSegmentStats) ? sp.roofSegmentStats.length : null;
