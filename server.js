@@ -1902,7 +1902,10 @@ app.post('/analyze', requireAuth, requireActiveSubscription, async (req, res) =>
   }
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+        let response, data, parsed, cleaned;
+    for (let _attempt = 1; _attempt <= 3; _attempt++) {
+      try {
+        response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1922,21 +1925,29 @@ app.post('/analyze', requireAuth, requireActiveSubscription, async (req, res) =>
         }]
       })
     });
-
-    const data = await response.json();
-    if (!response.ok) {
-      console.error('[analyze] anthropic returned', response.status, data);
-      return res.status(502).json({ error: 'upstream_error', status: response.status, detail: data });
-    }
-
-    const text = (data.content || []).filter(c => c.type === 'text').map(c => c.text).join('').trim();
-    const cleaned = text.replace(/^```json\s*|\s*```$/g, '').trim();
-    let parsed;
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch (e) {
-      console.error('[analyze] failed to parse model output:', cleaned.slice(0, 500));
-      return res.status(502).json({ error: 'bad_model_output', raw: cleaned });
+      } catch (_netErr) {
+        if (_attempt < 3) { await new Promise(function(r){ setTimeout(r, _attempt * 1200); }); continue; }
+        console.error('[analyze] fetch failed', _netErr && _netErr.message);
+        return res.status(502).json({ error: 'upstream_error', detail: String((_netErr && _netErr.message) || _netErr) });
+      }
+      data = await response.json();
+      if (!response.ok) {
+        if ((response.status === 429 || response.status === 529 || response.status >= 500) && _attempt < 3) {
+          await new Promise(function(r){ setTimeout(r, _attempt * 1500); }); continue;
+        }
+        console.error('[analyze] anthropic returned', response.status, data);
+        return res.status(502).json({ error: 'upstream_error', status: response.status, detail: data });
+      }
+      cleaned = (data.content || []).filter(function(c){ return c.type === 'text'; }).map(function(c){ return c.text; }).join('').trim();
+      parsed = null;
+      try { parsed = JSON.parse(cleaned); } catch (e0) {}
+      if (!parsed) {
+        try { var _a = cleaned.indexOf('{'), _b = cleaned.lastIndexOf('}'); if (_a >= 0 && _b > _a) parsed = JSON.parse(cleaned.slice(_a, _b + 1)); } catch (e2) {}
+      }
+      if (parsed) break;
+      if (_attempt < 3) { await new Promise(function(r){ setTimeout(r, 700); }); continue; }
+      console.error('[analyze] failed to parse model output:', (cleaned || '').slice(0, 500));
+      return res.status(502).json({ error: 'bad_model_output', raw: (cleaned || '').slice(0, 2000) });
     }
 
     // Cost calc: Claude Sonnet 4.6 input ~$3/Mtok, output ~$15/Mtok (approx â update as needed)
