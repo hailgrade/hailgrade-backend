@@ -1492,6 +1492,7 @@ app.post('/events', requireAuth, async (req, res) => {
         const _ev = { summary: _gt };
         if (_gb.description) _ev.description = _gb.description;
         if (_gb.location) _ev.location = _gb.location;
+        if (Array.isArray(_gb.attendees) && _gb.attendees.length) _ev.attendees = _gb.attendees;
         if (_gb.all_day) {
           const _sd = String(_gb.starts_at).slice(0, 10);
           const _ed0 = _gb.ends_at ? String(_gb.ends_at).slice(0, 10) : _sd;
@@ -1502,7 +1503,8 @@ app.post('/events', requireAuth, async (req, res) => {
           _ev.start = { dateTime: _gb.starts_at };
           _ev.end = { dateTime: _gb.ends_at || new Date(new Date(_gb.starts_at).getTime() + 3600000).toISOString() };
         }
-        const _gr = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+        const _gcalUrl = (_ev.attendees && _ev.attendees.length) ? ('https://www.googleapis.com/calendar/v3/calendars/primary/events?sendUpdates=all') : 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+        const _gr = await fetch(_gcalUrl, {
           method: 'POST',
           headers: { Authorization: 'Bearer ' + _gtok, 'Content-Type': 'application/json' },
           body: JSON.stringify(_ev)
