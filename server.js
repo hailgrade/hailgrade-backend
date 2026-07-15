@@ -213,7 +213,7 @@ app.get('/admin/users', requireAuth, requireAdmin, async (req, res) => {
     let rows;
     if (search) {
       rows = await q(
-        `SELECT id, email, full_name, license_number, firm_name, role, plan, plan_status,
+        `SELECT id, email, full_name, license_number, firm_name, role, plan, plan_status, active,
                 plan_renews_at, monthly_analyses_used, created_at, stripe_customer_id
          FROM users
          WHERE lower(email) LIKE $1 OR lower(coalesce(full_name,'')) LIKE $1 OR lower(coalesce(firm_name,'')) LIKE $1
@@ -222,7 +222,7 @@ app.get('/admin/users', requireAuth, requireAdmin, async (req, res) => {
       );
     } else {
       rows = await q(
-        `SELECT id, email, full_name, license_number, firm_name, role, plan, plan_status,
+        `SELECT id, email, full_name, license_number, firm_name, role, plan, plan_status, active,
                 plan_renews_at, monthly_analyses_used, created_at, stripe_customer_id
          FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
@@ -241,7 +241,7 @@ app.get('/admin/users', requireAuth, requireAdmin, async (req, res) => {
 app.patch('/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id);
   if (!id) return res.status(400).json({ error: 'bad_id' });
-  const allowed = ['role', 'plan_status', 'plan', 'license_number', 'firm_name', 'full_name'];
+  const allowed = ['role', 'plan_status', 'plan', 'license_number', 'firm_name', 'full_name', 'active'];
   const fields = Object.keys(req.body || {}).filter(k => allowed.includes(k));
   if (fields.length === 0) return res.status(400).json({ error: 'no_updatable_fields' });
   const sets = fields.map((k, i) => `${k} = $${i + 2}`).join(', ');
@@ -256,6 +256,27 @@ app.patch('/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('[admin/users PATCH]', err);
     res.status(500).json({ error: 'update_failed', detail: err.message });
+  }
+});
+
+// Open (impersonate) any account — mints a normal login token for the target user so an
+// admin can act as them for support. Guarded by requireAdmin (admin role + admin password).
+app.post('/admin/users/:id/impersonate', requireAuth, requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'bad_id' });
+  try {
+    const user = await one('SELECT * FROM users WHERE id = $1', [id]);
+    if (!user) return res.status(404).json({ error: 'not_found' });
+    if (user.active === false) return res.status(409).json({ error: 'target_deactivated', message: 'This account is deactivated. Reactivate it first, then open it.' });
+    const token = signToken(user);
+    console.log('[admin/impersonate] ' + req.user.email + ' (id ' + req.user.id + ') opened account ' + user.email + ' (id ' + user.id + ')');
+    res.json({
+      token,
+      user: { id: user.id, email: user.email, full_name: user.full_name, license_number: user.license_number, firm_name: user.firm_name, role: user.role, plan: user.plan, plan_status: user.plan_status }
+    });
+  } catch (err) {
+    console.error('[admin/impersonate]', err);
+    res.status(500).json({ error: 'impersonate_failed', detail: err.message });
   }
 });
 
