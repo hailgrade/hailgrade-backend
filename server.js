@@ -797,7 +797,7 @@ app.get('/emails/search', requireAuth, async (req, res) => {
     const q = '(' + trustedTerms.join(' OR ') + ') newer_than:' + days + 'd';
     // Step 1: list matching message IDs (max 30)
     const listResp = await fetch(
-      'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=30&q=' + encodeURIComponent(q),
+      'https://gmail.googleapis.com/gmail/v1/users/me/threads?maxResults=100&q=' + encodeURIComponent(q),
       { headers: { authorization: 'Bearer ' + accessToken } }
     );
     if (!listResp.ok) {
@@ -805,40 +805,45 @@ app.get('/emails/search', requireAuth, async (req, res) => {
       return res.json({ messages: [], _debug: { error: 'gmail_list_http_' + listResp.status, body: errTxt.slice(0, 300) } });
     }
     const listData = await listResp.json();
-    const ids = (listData.messages || []).map(m => m.id);
+    const ids = (listData.threads || []).map(t => t.id);
     if (!ids.length) {
       return res.json({ messages: [], _debug: { q, total_matches: 0 } });
     }
     // Step 2: fetch metadata for each â parallel
     const metaPromises = ids.map(async (id) => {
       try {
-        const mResp = await fetch(
-          'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + id + '?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date',
+        const tResp = await fetch(
+          'https://gmail.googleapis.com/gmail/v1/users/me/threads/' + id + '?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date',
           { headers: { authorization: 'Bearer ' + accessToken } }
         );
-        if (!mResp.ok) return null;
-        const m = await mResp.json();
-        const headers = (m.payload && m.payload.headers) || [];
-        const dateStr = _headerVal(headers, 'Date');
-        const ts = dateStr ? new Date(dateStr).getTime() : 0;
-        return {
-          id: m.id,
-          thread_id: m.threadId,
-          from: _headerVal(headers, 'From'),
-          to: _headerVal(headers, 'To'),
-          subject: _headerVal(headers, 'Subject'),
-          date_iso: ts ? new Date(ts).toISOString() : null,
-          date_raw: dateStr,
-          snippet: m.snippet || '',
-          labels: m.labelIds || [],
-          has_attachments: (m.payload && m.payload.parts || []).some(p => p.filename && p.filename.length > 0)
-        };
-      } catch (e) { return null; }
+        if (!tResp.ok) return [];
+        const t = await tResp.json();
+        return ((t && t.messages) || []).map((m) => {
+          const headers = (m.payload && m.payload.headers) || [];
+          const dateStr = _headerVal(headers, 'Date');
+          const ts = dateStr ? new Date(dateStr).getTime() : 0;
+          return {
+            id: m.id,
+            thread_id: m.threadId,
+            from: _headerVal(headers, 'From'),
+            to: _headerVal(headers, 'To'),
+            subject: _headerVal(headers, 'Subject'),
+            date_iso: ts ? new Date(ts).toISOString() : null,
+            date_raw: dateStr,
+            snippet: m.snippet || '',
+            labels: m.labelIds || [],
+            has_attachments: ((m.payload && m.payload.parts) || []).some(p => p.filename && p.filename.length > 0)
+          };
+        });
+      } catch (e) { return []; }
     });
-    const metas = (await Promise.all(metaPromises)).filter(Boolean);
+    const _nested = (await Promise.all(metaPromises));
+    const _seen = new Set();
+    const metas = [];
+    for (const _arr of _nested) { for (const _m of (_arr || [])) { if (_m && _m.id && !_seen.has(_m.id)) { _seen.add(_m.id); metas.push(_m); } } }
     // Sort newest first
     metas.sort((a, b) => (b.date_iso || '').localeCompare(a.date_iso || ''));
-    return res.json({ messages: metas, _debug: { q, count: metas.length } });
+    return res.json({ messages: metas, _debug: { q, threads: ids.length, count: metas.length } });
   } catch (err) {
     console.error('[/emails/search]', err);
     return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
