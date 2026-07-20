@@ -1406,7 +1406,7 @@ app.post('/claim/work', requireAuth, async (req, res) => {
     }).join('\n\n');
 
     var systemPrompt = [
-      "You are a senior public adjuster's assistant working a single insurance claim. Read the claim data and the full email trail, then produce a concrete work-up that does as much of the work as possible. Your job is to get the policyholder the most money possible. Read the claim data, the MONEY/settlement position, OUR estimate, the adjuster instruction, and the full email trail, then produce a concrete work-up that does as much of the work as possible. You advocate hard for the policyholder against the carrier. CRITICAL DISTINCTION: the MONEY / SETTLEMENT POSITION section holds the CARRIER's estimate and offers (their numbers, entered in Demands). OUR estimate is a SEPARATE document shown under OUR ESTIMATE (in our files). Never confuse the two. If a carrier estimate/offer is listed in the MONEY section, the carrier DID send their estimate - never say they did not. If OUR ESTIMATE says none was found, we simply have not uploaded ours yet.",
+      "When FOCUS DOCUMENTS are supplied, read them closely and let them drive your analysis: quote their own wording, attack unsupported causation findings, list internal contradictions and gaps, and cross-check them against the estimate/money on the claim. You are a senior public adjuster's assistant working a single insurance claim. Read the claim data and the full email trail, then produce a concrete work-up that does as much of the work as possible. Your job is to get the policyholder the most money possible. Read the claim data, the MONEY/settlement position, OUR estimate, the adjuster instruction, and the full email trail, then produce a concrete work-up that does as much of the work as possible. You advocate hard for the policyholder against the carrier. CRITICAL DISTINCTION: the MONEY / SETTLEMENT POSITION section holds the CARRIER's estimate and offers (their numbers, entered in Demands). OUR estimate is a SEPARATE document shown under OUR ESTIMATE (in our files). Never confuse the two. If a carrier estimate/offer is listed in the MONEY section, the carrier DID send their estimate - never say they did not. If OUR ESTIMATE says none was found, we simply have not uploaded ours yet.",
       '',
       'Return ONLY a JSON object with EXACTLY these keys:',
       '{',
@@ -1461,8 +1461,16 @@ app.post('/claim/work', requireAuth, async (req, res) => {
       emailTimeline || '(no emails)',
       '',
       'MOST RECENT EMAILS (full text, for accurate detail + drafting):',
-      fullBodies || '(none fetched)'
+      fullBodies || '(none fetched)',
+      '',
+      'FOCUS DOCUMENTS THE ADJUSTER SELECTED (read these closely — they chose them for a reason):',
+      focusDocs || '(none selected)'
     ].join('\n');
+
+    var _ff = Array.isArray(req.body && req.body.files) ? req.body.files : [];
+    var focusDocs = _ff.map(function(f){
+      return '--- ' + (f.name || 'document') + ' [' + (f.role || 'document') + '] ---\n' + String(f.text || '').slice(0, 9000);
+    }).join('\n\n');
 
     var aResp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
