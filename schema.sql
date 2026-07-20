@@ -78,3 +78,7 @@ CREATE TABLE IF NOT EXISTS stripe_events (
   type          TEXT NOT NULL,
   processed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Password rotation: set when a user changes their password. Any token issued
+-- BEFORE this timestamp is rejected, so changing the password signs out other devices.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ;
