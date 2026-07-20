@@ -5793,6 +5793,7 @@ async function _ensureLeadPaStatusesTable() {
   await pool.query(
     "CREATE TABLE IF NOT EXISTS lead_pa_statuses (lead_id INT PRIMARY KEY, pa_user_id INT NOT NULL, stage TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
   );
+  await pool.query('ALTER TABLE lead_pa_statuses ADD COLUMN IF NOT EXISTS net_to_roof NUMERIC');
   _leadPaStatusesEnsured = true;
 }
 
@@ -5804,14 +5805,18 @@ app.post("/partners/lead-status", requireAuth, async (req, res) => {
     const leadId = parseInt(req.body && req.body.lead_id, 10);
     const stage = String((req.body && req.body.stage) || "").slice(0, 64);
     if (!leadId || !stage) return res.status(400).json({ error: "bad_input" });
+    // Money the client has been paid that is earmarked for the roof. Optional - a stage-only
+    // push leaves the stored figure untouched (see COALESCE in the upsert below).
+    var _n = (req.body && req.body.net_to_roof != null && req.body.net_to_roof !== '') ? Number(req.body.net_to_roof) : null;
+    var netToRoof = (_n != null && isFinite(_n)) ? _n : null;
     // Verify this PA is actually assigned to this lead (only the PA who owns the lead can push status)
-    const lr = await pool.query("SELECT id, assigned_to_user_id, source_user_id FROM leads WHERE id = $1", [leadId]);
+    const lr = await pool.query("SELECT id, assigned_to, created_by FROM leads WHERE id = $1", [leadId]);
     const lead = lr && lr.rows && lr.rows[0];
     if (!lead) return res.status(404).json({ error: "lead_not_found" });
-    if (lead.assigned_to_user_id !== req.user.id) return res.status(403).json({ error: "not_authorized" });
+    if (lead.assigned_to !== req.user.id) return res.status(403).json({ error: "not_authorized" });
     await pool.query(
-      "INSERT INTO lead_pa_statuses (lead_id, pa_user_id, stage, updated_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (lead_id) DO UPDATE SET stage = EXCLUDED.stage, pa_user_id = EXCLUDED.pa_user_id, updated_at = NOW()",
-      [leadId, req.user.id, stage]
+      "INSERT INTO lead_pa_statuses (lead_id, pa_user_id, stage, net_to_roof, updated_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (lead_id) DO UPDATE SET stage = EXCLUDED.stage, pa_user_id = EXCLUDED.pa_user_id, net_to_roof = COALESCE(EXCLUDED.net_to_roof, lead_pa_statuses.net_to_roof), updated_at = NOW()",
+      [leadId, req.user.id, stage, netToRoof]
     );
     return res.json({ ok: true, lead_id: leadId, stage: stage });
   } catch (err) {
@@ -5825,9 +5830,9 @@ app.get("/partners/sent-statuses", requireAuth, async (req, res) => {
   try {
     await _ensureLeadPaStatusesTable();
     const r = await pool.query(
-      "SELECT l.id AS lead_id, l.name AS lead_name, lps.stage, lps.updated_at, lps.pa_user_id " +
+      "SELECT l.id AS lead_id, l.name AS lead_name, lps.stage, lps.updated_at, lps.pa_user_id, lps.net_to_roof " +
       "FROM leads l LEFT JOIN lead_pa_statuses lps ON lps.lead_id = l.id " +
-      "WHERE l.source_user_id = $1 " +
+      "WHERE l.created_by = $1 " +
       "ORDER BY lps.updated_at DESC NULLS LAST, l.id DESC",
       [req.user.id]
     );
