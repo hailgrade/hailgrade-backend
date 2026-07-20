@@ -37,6 +37,15 @@ export async function requireAuth(req, res, next) {
     const user = await one('SELECT * FROM users WHERE id = $1', [payload.uid]);
     if (!user) return res.status(401).json({ error: 'user_not_found' });
     if (user.active === false) return res.status(403).json({ error: 'account_deactivated', message: 'This account has been deactivated by your organization administrator.' });
+    // A password change signs out every OTHER device: any token minted before the change
+    // is refused. Compared at second precision because JWT `iat` is whole seconds.
+    if (user.password_changed_at) {
+      const changedSec = Math.floor(new Date(user.password_changed_at).getTime() / 1000);
+      const iatSec = payload.iat || 0;
+      if (iatSec && changedSec && iatSec < changedSec) {
+        return res.status(401).json({ error: 'password_changed', message: 'Your password was changed. Please sign in again.' });
+      }
+    }
     req.user = user;
     next();
   } catch (err) {
