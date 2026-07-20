@@ -102,6 +102,8 @@ app.post('/auth/login', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'invalid_credentials' });
     const ok = await checkPassword(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: 'invalid_credentials' });
+    // Stamp the sign-in so the admin dashboard can show real usage.
+    try { await q('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]); } catch (e) {}
     const token = signToken(user);
     res.json({
       token,
@@ -299,7 +301,7 @@ app.get('/admin/users', requireAuth, requireAdmin, async (req, res) => {
     let rows;
     if (search) {
       rows = await q(
-        `SELECT id, email, full_name, license_number, firm_name, role, plan, plan_status, active,
+        `SELECT id, email, full_name, license_number, firm_name, role, plan, plan_status, last_login_at, active,
                 plan_renews_at, monthly_analyses_used, created_at, stripe_customer_id
          FROM users
          WHERE lower(email) LIKE $1 OR lower(coalesce(full_name,'')) LIKE $1 OR lower(coalesce(firm_name,'')) LIKE $1
@@ -308,7 +310,7 @@ app.get('/admin/users', requireAuth, requireAdmin, async (req, res) => {
       );
     } else {
       rows = await q(
-        `SELECT id, email, full_name, license_number, firm_name, role, plan, plan_status, active,
+        `SELECT id, email, full_name, license_number, firm_name, role, plan, plan_status, last_login_at, active,
                 plan_renews_at, monthly_analyses_used, created_at, stripe_customer_id
          FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
