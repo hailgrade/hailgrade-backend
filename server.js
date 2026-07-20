@@ -143,6 +143,58 @@ app.post('/auth/change-password', requireAuth, async (req, res) => {
   }
 });
 
+// POST /claim/ask — a LEAN follow-up question about a claim.
+// Deliberately does none of the heavy lifting /claim/work does (no email re-fetch, no
+// attachment sweep, no estimate re-read). One short call, one direct answer.
+app.post('/claim/ask', requireAuth, async (req, res) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'no_api_key' });
+    const b = req.body || {};
+    const question = String(b.question || '').trim();
+    if (!question) return res.status(400).json({ error: 'no_question', message: 'Ask a question first.' });
+    const files = Array.isArray(b.files) ? b.files : [];
+    const docs = files.map(function(f){
+      return '--- ' + (f.name || 'document') + ' [' + (f.role || 'document') + '] ---\n' + String(f.text || '').slice(0, 9000);
+    }).join('\n\n');
+    const system = [
+      'You are a senior public adjuster helping the user work a property insurance claim.',
+      'Answer ONLY the question asked. Be direct and specific.',
+      'Do NOT produce a full claim overview, status summary, or a generic next-steps list unless that is literally what was asked.',
+      'Use the claim data, money figures and any documents supplied. Quote exact figures and document wording where it helps.',
+      'If the answer depends on something you were not given, say so plainly in one line instead of guessing.',
+      'Keep it tight: a few short paragraphs or a short list. If asked to draft something, output the draft itself.'
+    ].join(' ');
+    const user = [
+      'CLAIM: ' + JSON.stringify(b.claim || {}),
+      'MONEY: ' + JSON.stringify(b.money || {}),
+      '',
+      'DOCUMENTS THE ADJUSTER SELECTED:',
+      docs || '(none selected)',
+      '',
+      'RECENT EMAIL CONTEXT:',
+      String(b.emailContext || '(none)').slice(0, 5000),
+      '',
+      'QUESTION: ' + question
+    ].join('\n');
+    const aResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1400, system: system, messages: [{ role: 'user', content: user }] })
+    });
+    if (!aResp.ok) {
+      const errTxt = await aResp.text().catch(function(){ return ''; });
+      return res.status(500).json({ error: 'anthropic_error', message: errTxt.slice(0, 200) });
+    }
+    const aData = await aResp.json();
+    const answer = (aData.content && aData.content[0] && aData.content[0].text) || '';
+    if (!answer.trim()) return res.status(500).json({ error: 'empty_answer' });
+    return res.json({ answer: answer.trim() });
+  } catch (err) {
+    console.error('[/claim/ask]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
 app.get('/me', requireAuth, async (req, res) => {
   const u = req.user;
   // Auto-promote founder emails to admin so they don't need a SQL session to bootstrap
