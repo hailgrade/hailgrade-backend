@@ -919,6 +919,21 @@ app.get('/emails/search', requireAuth, async (req, res) => {
       const errTxt = await listResp.text().catch(() => '');
       return res.json({ messages: [], _debug: { error: 'gmail_list_http_' + listResp.status, body: errTxt.slice(0, 300) } });
     }
+    // Gmail's metadata format does NOT return the MIME part tree, so has_attachments cannot
+    // be derived from the payload - it always came back false and nothing was ever swept.
+    // Ask Gmail directly which messages carry attachments.
+    var _attIds = {};
+    try {
+      var _aq = q + ' has:attachment';
+      var _aResp = await fetch(
+        'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=300&q=' + encodeURIComponent(_aq),
+        { headers: { authorization: 'Bearer ' + accessToken } }
+      );
+      if (_aResp.ok) {
+        var _aData = await _aResp.json();
+        (_aData.messages || []).forEach(function (mm) { if (mm && mm.id) _attIds[mm.id] = true; });
+      }
+    } catch (e) {}
     const listData = await listResp.json();
     const ids = (listData.threads || []).map(t => t.id);
     if (!ids.length) {
@@ -947,7 +962,7 @@ app.get('/emails/search', requireAuth, async (req, res) => {
             date_raw: dateStr,
             snippet: m.snippet || '',
             labels: m.labelIds || [],
-            has_attachments: ((m.payload && m.payload.parts) || []).some(p => p.filename && p.filename.length > 0)
+            has_attachments: !!_attIds[m.id]
           };
         });
       } catch (e) { return []; }
