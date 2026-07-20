@@ -117,6 +117,32 @@ app.post('/auth/login', async (req, res) => {
 // Add additional admin emails here if you bring on a co-founder or support staff.
 const ADMIN_EMAILS = new Set(['adjustingsmith@gmail.com', 'claims@smithadjusters.com']);
 
+// POST /auth/change-password — rotate this account's password.
+// Verifies the CURRENT password first, then stamps password_changed_at, which invalidates
+// every token issued before now — i.e. all other devices are signed out. Returns a fresh
+// token so the device doing the change stays logged in.
+app.post('/auth/change-password', requireAuth, async (req, res) => {
+  try {
+    const { current_password, new_password } = req.body || {};
+    if (!current_password || !new_password) return res.status(400).json({ error: 'both_passwords_required', message: 'Enter your current and new password.' });
+    const next = String(new_password);
+    if (next.length < 10) return res.status(400).json({ error: 'password_too_short', message: 'Use at least 10 characters.' });
+    if (next === String(current_password)) return res.status(400).json({ error: 'same_password', message: 'That is the password you are already using.' });
+    const user = await one('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    if (!user) return res.status(401).json({ error: 'user_not_found' });
+    const ok = await checkPassword(current_password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: 'wrong_password', message: 'Your current password is not correct.' });
+    const hash = await hashPassword(next);
+    await q('UPDATE users SET password_hash = $1, password_changed_at = now() WHERE id = $2', [hash, user.id]);
+    const fresh = await one('SELECT * FROM users WHERE id = $1', [user.id]);
+    const token = signToken(fresh);
+    return res.json({ ok: true, token, message: 'Password changed. Every other device has been signed out.' });
+  } catch (err) {
+    console.error('[/auth/change-password]', err);
+    return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
+  }
+});
+
 app.get('/me', requireAuth, async (req, res) => {
   const u = req.user;
   // Auto-promote founder emails to admin so they don't need a SQL session to bootstrap
