@@ -162,7 +162,8 @@ app.post('/claim/ask', requireAuth, async (req, res) => {
       'Do NOT produce a full claim overview, status summary, or a generic next-steps list unless that is literally what was asked.',
       'Use the claim data, money figures and any documents supplied. Quote exact figures and document wording where it helps.',
       'If the answer depends on something you were not given, say so plainly in one line instead of guessing.',
-      'Keep it tight: a few short paragraphs or a short list. If asked to draft something, output the draft itself.'
+      'Keep it tight: a few short paragraphs or a short list. If asked to draft something, output the draft itself.',
+      'After your answer, output a line containing exactly ---CLIFF--- and then 3-5 one-line bullets (start each with "- ") giving the cliff-notes takeaways: the findings that matter, any dollar figures, and the action to take. Each bullet under 140 characters. No heading, just the bullets.'
     ].join(' ');
     const user = [
       'CLAIM: ' + JSON.stringify(b.claim || {}),
@@ -186,9 +187,16 @@ app.post('/claim/ask', requireAuth, async (req, res) => {
       return res.status(500).json({ error: 'anthropic_error', message: errTxt.slice(0, 200) });
     }
     const aData = await aResp.json();
-    const answer = (aData.content && aData.content[0] && aData.content[0].text) || '';
-    if (!answer.trim()) return res.status(500).json({ error: 'empty_answer' });
-    return res.json({ answer: answer.trim() });
+    const raw = (aData.content && aData.content[0] && aData.content[0].text) || '';
+    if (!raw.trim()) return res.status(500).json({ error: 'empty_answer' });
+    // Split the reply into the full answer and the short cliff-notes bullets.
+    let answer = raw.trim(), cliff = '';
+    const cut = raw.indexOf('---CLIFF---');
+    if (cut > -1) {
+      answer = raw.slice(0, cut).trim();
+      cliff = raw.slice(cut + 11).trim();
+    }
+    return res.json({ answer: answer, cliff: cliff });
   } catch (err) {
     console.error('[/claim/ask]', err);
     return res.status(500).json({ error: 'server_error', message: (err && err.message) || 'unknown' });
