@@ -1112,13 +1112,27 @@ app.post('/emails/send', requireAuth, async (req, res) => {
     const needsEnc = Buffer.byteLength(subject, 'utf8') !== subject.length;
     const encSubject = needsEnc ? ('=?UTF-8?B?' + Buffer.from(subject, 'utf8').toString('base64') + '?=') : subject;
 
-    const hasAtt = !!(b.attachment_base64 && b.attachment_name);
+    // Attachments: accept an `attachments` array [{name, mime, base64}] and keep honouring
+    // the original single attachment_* fields so existing callers keep working.
+    const _attList = [];
+    if (Array.isArray(req.body && req.body.attachments)) {
+      req.body.attachments.forEach(function(a){
+        if (!a) return;
+        const _b = String(a.base64 || a.data || '');
+        if (!_b) return;
+        _attList.push({ name: String(a.name || 'attachment'), mime: String(a.mime || a.mime_type || 'application/octet-stream'), base64: _b });
+      });
+    }
+    if (attachment_base64 && attachment_name) {
+      _attList.push({ name: String(attachment_name), mime: String(attachment_mime || 'application/octet-stream'), base64: String(attachment_base64) });
+    }
+    const hasAtt = _attList.length > 0;
     let rfc822;
     if (hasAtt) {
-      const attName = String(b.attachment_name);
-      const attMime = String(b.attachment_mime || 'application/octet-stream');
-      const attData = String(b.attachment_base64).replace(/\s/g, '');
-      const wrapped = attData.replace(/.{76}/g, function (m) { return m + CRLF; });
+
+
+
+
       const boundary = 'ample_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
       const head = [];
       head.push('To: ' + to);
@@ -1133,12 +1147,20 @@ app.post('/emails/send', requireAuth, async (req, res) => {
       parts.push('Content-Transfer-Encoding: 8bit');
       parts.push('');
       parts.push(bodyText);
-      parts.push('--' + boundary);
-      parts.push('Content-Type: ' + attMime + '; name="' + attName + '"');
-      parts.push('Content-Transfer-Encoding: base64');
-      parts.push('Content-Disposition: attachment; filename="' + attName + '"');
-      parts.push('');
-      parts.push(wrapped);
+
+      _attList.forEach(function(att){
+        const _wrapped = String(att.base64).replace(/[\r\n]/g,'').replace(/(.{76})/g, function(m){ return m + CRLF; });
+        parts.push('--' + boundary);
+        parts.push('Content-Type: ' + att.mime + '; name="' + att.name + '"');
+        parts.push('Content-Transfer-Encoding: base64');
+        parts.push('Content-Disposition: attachment; filename="' + att.name + '"');
+        parts.push('');
+        parts.push(_wrapped);
+      });
+
+
+
+
       parts.push('--' + boundary + '--');
       rfc822 = head.join(CRLF) + CRLF + CRLF + parts.join(CRLF);
     } else {
