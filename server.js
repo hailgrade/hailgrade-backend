@@ -1123,8 +1123,13 @@ app.post('/emails/send', requireAuth, async (req, res) => {
         _attList.push({ name: String(a.name || 'attachment'), mime: String(a.mime || a.mime_type || 'application/octet-stream'), base64: _b });
       });
     }
-    if (attachment_base64 && attachment_name) {
-      _attList.push({ name: String(attachment_name), mime: String(attachment_mime || 'application/octet-stream'), base64: String(attachment_base64) });
+    // Legacy single-attachment fields (attorney package sends this shape). Read straight off
+    // req.body - the destructuring that used to provide these locals is gone.
+    var _legacyB64  = (req.body && req.body.attachment_base64) || '';
+    var _legacyName = (req.body && req.body.attachment_name) || '';
+    var _legacyMime = (req.body && req.body.attachment_mime) || 'application/octet-stream';
+    if (_legacyB64 && _legacyName) {
+      _attList.push({ name: String(_legacyName), mime: String(_legacyMime), base64: String(_legacyB64) });
     }
     const hasAtt = _attList.length > 0;
     let rfc822;
