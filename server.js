@@ -4262,6 +4262,27 @@ function _ltrResolve(text, data){
   return out;
 }
 const LETTER_TEMPLATES=[
+  { id:'appraisal-demand', name:'Demand for Appraisal', category:'Letters', esign:false, blocks:[
+    {p:'[[today]:format(long)]',tight:true},{gap:8},
+    {p:'[[insurance.company]]',tight:true},
+    {p:'[[insurance.company.address.line1]]',tight:true},
+    {p:'[[insurance.company.address.line2]]',tight:true},{gap:10},
+    {p:'RE:  Policy #[[insurance.policynumber]],  Claim #[[insurance.claimnumber]]',bold:true,tight:true},
+    {p:'Insured:  [[policyholders.name]]',bold:true,tight:true},
+    {p:'Loss location:  [[loss.address]]',bold:true,tight:true},
+    {p:'Date of loss:  [[loss.date]]',bold:true,tight:true},{gap:10},
+    {p:'Greetings:',tight:true},{gap:6},
+    {p:'This letter will acknowledge receipt of your estimate. At this time, we have elected to demand appraisal. The following individual has been appointed as our appraiser for the appraisal proceedings:'},{gap:10},
+    {p:'Appraiser:  ____________________________________',tight:true},
+    {p:'Company:  _____________________________________',tight:true},
+    {p:'Address:  ______________________________________',tight:true},
+    {p:'Phone:  ________________________________________',tight:true},
+    {p:'Email:  _________________________________________',tight:true},{gap:12},
+    {p:'Thank you for your professional courtesy and cooperation. We look forward to working with you towards an amicable resolution. Please contact the undersigned with any questions or concerns.'},{gap:12},
+    {p:'Regards,',tight:true},{gap:18},
+    {p:'[[personnel.adjuster.name]]',tight:true},
+    {p:'Public Adjuster',tight:true}
+  ] },
   { id:'90day', name:'90-Day Notice to Insurance Company', category:'Letters', esign:false, blocks:[
     {p:'[[today]:format(long)]',tight:true},{gap:8},
     {p:'RE:  Policy #[[insurance.policynumber]],  Claim #[[insurance.claimnumber]]',bold:true,tight:true},{gap:10},
