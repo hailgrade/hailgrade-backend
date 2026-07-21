@@ -4238,6 +4238,21 @@ function _ltrParseToken(tokenFull){
   }
   return {field,mods};
 }
+// Everything drawn into the PDF goes through WinAnsi, which rejects smart quotes, en/em
+// dashes and any stray control byte. One bad character in a firm name or a pasted note
+// failed the ENTIRE letter, so normalise here rather than trusting every source of text.
+function _ltrSafe(v){
+  var t = String(v == null ? '' : v);
+  t = t.replace(/\u00E2\u0080\u00A2/g, '\u2022');
+  t = t.replace(/[\u2018\u2019\u201A\u201B]/g, "'");
+  t = t.replace(/[\u201C\u201D\u201E\u201F]/g, '"');
+  t = t.replace(/[\u2013\u2014\u2015]/g, '-');
+  t = t.replace(/\u2026/g, '...');
+  t = t.replace(/\u00A0/g, ' ');
+  t = t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
+  t = t.replace(/[^\u0020-\u00FF\u2022]/g, '');
+  return t;
+}
 function _ltrResolve(text, data){
   // Field values come from claim data - firm names, notes and addresses pasted out of Word
   // carry smart quotes and stray control bytes that WinAnsi cannot encode.
@@ -4335,22 +4350,7 @@ async function renderLetterPdf(tpl, data){
     const aw=helv.widthOfTextAtSize(addr,8); page.drawText(addr,{x:(W-aw)/2,y:y,size:8,font:helv,color:GREY}); y-=10;
     page.drawLine({start:{x:M,y:y},end:{x:RIGHT,y:y},thickness:1,color:GREEN}); y-=22; }
   function need(h){ if(y-h<70){ page=pdf.addPage([W,H]); pageIdx++; y=H-64; } }
-  // Everything drawn into the PDF goes through WinAnsi, which rejects smart quotes, en/em
-// dashes and any stray control byte. One bad character in a firm name or a pasted note
-// failed the ENTIRE letter, so normalise here rather than trusting every source of text.
-function _ltrSafe(v){
-  var t = String(v == null ? '' : v);
-  t = t.replace(/\u00E2\u0080\u00A2/g, '\u2022');
-  t = t.replace(/[\u2018\u2019\u201A\u201B]/g, "'");
-  t = t.replace(/[\u201C\u201D\u201E\u201F]/g, '"');
-  t = t.replace(/[\u2013\u2014\u2015]/g, '-');
-  t = t.replace(/\u2026/g, '...');
-  t = t.replace(/\u00A0/g, ' ');
-  t = t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
-  t = t.replace(/[^\u0020-\u00FF\u2022]/g, '');
-  return t;
-}
-function wrap(text,font,size,width){
+  function wrap(text,font,size,width){
   text = _ltrSafe(text); const words=String(text).split(/(\s+)/); const lines=[]; let cur=''; for(const w of words){ const test=cur+w; if(font.widthOfTextAtSize(test,size)>width&&cur.trim()){ lines.push(cur); cur=w.replace(/^\s+/,''); } else cur=test; } if(cur.trim()) lines.push(cur); return lines; }
   header();
   for(const b of tpl.blocks){
