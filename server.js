@@ -326,6 +326,60 @@ app.get('/admin/users', requireAuth, requireAdmin, async (req, res) => {
 });
 
 // Update a user (role, plan_status, license, firm, name)
+// ---- Admin: partner links (connect a PA to a roofer directly) ----
+// The normal flow is code-based: the PA issues a code and the roofer redeems it. That needs
+// both people present. These let an admin wire the same partner_links row from the console.
+app.get('/admin/partner-links', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const rows = await q(
+      'SELECT pl.pa_user_id, pl.roofer_user_id, pl.created_at, ' +
+      "pa.email AS pa_email, pa.full_name AS pa_name, pa.firm_name AS pa_firm, " +
+      "rf.email AS roofer_email, rf.full_name AS roofer_name, rf.firm_name AS roofer_firm " +
+      'FROM partner_links pl ' +
+      'JOIN users pa ON pa.id = pl.pa_user_id ' +
+      'JOIN users rf ON rf.id = pl.roofer_user_id ' +
+      'ORDER BY pl.created_at DESC NULLS LAST'
+    );
+    res.json({ links: rows });
+  } catch (err) {
+    console.error('[admin partner-links GET]', err);
+    res.status(500).json({ error: 'list_failed', message: err.message });
+  }
+});
+
+app.post('/admin/partner-links', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const paId = parseInt(req.body && req.body.pa_user_id);
+    const rooferId = parseInt(req.body && req.body.roofer_user_id);
+    if (!paId || !rooferId) return res.status(400).json({ error: 'bad_input' });
+    if (paId === rooferId) return res.status(400).json({ error: 'same_user' });
+    const us = await q('SELECT id, email, role FROM users WHERE id = $1 OR id = $2', [paId, rooferId]);
+    if (!us || us.length < 2) return res.status(404).json({ error: 'user_not_found' });
+    await q(
+      'INSERT INTO partner_links (pa_user_id, roofer_user_id) VALUES ($1, $2) ' +
+      'ON CONFLICT (pa_user_id, roofer_user_id) DO NOTHING',
+      [paId, rooferId]
+    );
+    res.json({ ok: true, pa_user_id: paId, roofer_user_id: rooferId });
+  } catch (err) {
+    console.error('[admin partner-links POST]', err);
+    res.status(500).json({ error: 'link_failed', message: err.message });
+  }
+});
+
+app.delete('/admin/partner-links', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const paId = parseInt(req.body && req.body.pa_user_id);
+    const rooferId = parseInt(req.body && req.body.roofer_user_id);
+    if (!paId || !rooferId) return res.status(400).json({ error: 'bad_input' });
+    await q('DELETE FROM partner_links WHERE pa_user_id = $1 AND roofer_user_id = $2', [paId, rooferId]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin partner-links DELETE]', err);
+    res.status(500).json({ error: 'unlink_failed', message: err.message });
+  }
+});
+
 app.patch('/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id);
   if (!id) return res.status(400).json({ error: 'bad_id' });
