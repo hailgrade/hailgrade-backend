@@ -2527,6 +2527,10 @@ Rules:
 - If a value is ambiguous or not clearly visible, return null for that key.
 - Do not invent values. Do not include keys other than those above.
 - Coverages + deductible must be numeric strings, no symbols ("350000" not "$350,000").
+- Read Coverage A/B/C/D from the "Coverage" / "Limits of Liability" / "Section I" table ONLY. NEVER use premium amounts (usually smaller figures labeled Premium), replacement-cost totals, or the total policy premium as a coverage limit.
+- Coverage A (Dwelling) is the largest structural limit; B is typically 10% of A; C is typically 50-70% of A; D is typically 20-30% of A. If your extracted values grossly violate these ratios, re-read the table - you likely grabbed the wrong column.
+- policyStart / policyEnd: read the Policy Period, Effective Date, and Expiration Date fields; always return BOTH as YYYY-MM-DD when a policy period is shown.
+- The Hurricane / Named-Storm deductible (hurricaneDeductible) is separate from the AOP deductible and is often a percentage of Coverage A (for example 2%). Extract it even when an AOP deductible is also present, and never merge the two.
 - For "appraisal.available", return true ONLY if you can see explicit appraisal language. Many Dec pages don't include the appraisal clause text â in that case return null (not false). false is reserved for policies that explicitly say "this policy does NOT include an appraisal provision."
 - Output ONLY the JSON object. No markdown, no commentary, no code fences.`;
 
