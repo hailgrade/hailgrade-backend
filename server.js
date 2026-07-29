@@ -2520,12 +2520,19 @@ Return ONLY a JSON object with these keys (use null when a field is not clearly 
     "umpireProcess": "how an umpire is chosen if the two appraisers disagree (e.g., 'court appoints if parties cannot agree within 15 days'), or null",
     "feeAllocation": "who pays for what (e.g., 'each party pays own appraiser, umpire split equally'), or null",
     "rawText": "the actual relevant excerpt from the policy verbatim, max 600 characters. null if not extractable."
+  },
+  "roofPaymentSchedule": {
+    "present": "true if the policy contains a roof surfacing payment schedule / roof loss settlement schedule / roof payment schedule that reduces the ROOF claim payout based on the roof age or a fixed percentage table (common in Florida windstorm policies), false if the policy explicitly has none, null if you cannot tell from this document",
+    "name": "the exact printed name of the endorsement or provision, e.g. \"Roof Surfacing Payment Schedule\", \"Roof Loss Settlement - ACV\", \"Windstorm Roof Payment Schedule\", or null",
+    "basis": "one short phrase for HOW it cuts the roof payment - e.g. \"age-based percentage schedule\", \"ACV / actual cash value on roof surfacing\", \"non-recoverable depreciation by roof age\", or null",
+    "schedule": "if an age-to-payout table is shown, transcribe it as text (e.g. \"0-10 yrs: 100%, 11-15 yrs: 70%, 16-20 yrs: 50%, 21+ yrs: 25%\"), else null"
   }
 }
 
 Rules:
 - If a value is ambiguous or not clearly visible, return null for that key.
 - Do not invent values. Do not include keys other than those above.
+- Roof payment schedule: many Florida windstorm policies attach a "Roof Surfacing Payment Schedule" / "Roof Loss Settlement" endorsement that pays the ROOF claim at a reduced amount based on the roof age (a percentage table) or ACV. Search the endorsement / schedule pages, not just the dec page, and populate roofPaymentSchedule whenever present - it materially cuts the roof payout, so it must be caught.
 - Coverages + deductible must be numeric strings, no symbols ("350000" not "$350,000").
 - Read Coverage A/B/C/D from the "Coverage" / "Limits of Liability" / "Section I" table ONLY. NEVER use premium amounts (usually smaller figures labeled Premium), replacement-cost totals, or the total policy premium as a coverage limit.
 - Read every coverage limit and deductible as the EXACT digits printed in the declarations "Coverage / Coverage Limit" or "Limits of Liability" table, and transcribe them verbatim. NEVER round, average, estimate, or nudge a number to fit an expected pattern - "$388,000" must come out as "388000", not "355000". Do NOT assume fixed ratios between coverages: many Florida homeowners policies set Coverage B at $0, Coverage C (contents) near 20% of A, and Coverage D (loss of use) near 10% of A, so small B/C/D values are normal and correct. If any value is unclear, re-read that exact table cell instead of guessing.
