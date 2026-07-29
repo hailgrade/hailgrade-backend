@@ -2385,11 +2385,19 @@ Return ONLY a JSON object with these keys (use null when a value is not clearly 
   "deductible": "deductible amount, number only",
   "net_claim": "net amount payable / net claim if shown (often ACV minus deductible), number only",
   "amount": "the single most important headline dollar figure on the document, number only",
-  "summary": "one short sentence describing what this document is and its key number"
+  "summary": "one short sentence describing what this document is and its key number",
+  "roof": {
+    "rcv": "roof surfacing Replacement Cost Value (the roof line RCV) as a numeric string, or null",
+    "acv": "roof surfacing Actual Cash Value - what the carrier actually pays on the roof after the schedule - numeric string, or null",
+    "less_settlement_factor_amount": "the dollar amount a roof payment schedule deducts from the roof payout. On carrier estimates this line is usually labeled \"Less Settlement Factor\", \"Roof Settlement Factor\", or \"Less Non-Recoverable Roof Depreciation\". Numeric string, or null",
+    "less_settlement_factor_pct": "if the roof settlement factor is shown as a percentage, that percent number as a string (e.g. \"40\"), or null",
+    "recoverable_depreciation": "recoverable depreciation withheld on the roof surfacing only, numeric string, or null"
+  }
 }
 
 Rules:
 - All money values must be numeric strings, no symbols ("12345.67" not "$12,345.67"). Use null if not visible.
+- Roof settlement factor: carrier estimates where the policy carries a roof payment schedule reduce the roof payout with a line usually titled "Less Settlement Factor" (or "Roof Settlement Factor" / "Less Non-Recoverable Roof Depreciation"), inside the roof or "Summary of Roof Surfacing" section. Always look for it and fill the roof object - it is the deduction that cuts the roof payment, so it must be caught.
 - "amount" is your best single pick for the headline figure: prefer the grand total / RCV for an estimate, or the payment amount for a payment letter.
 - Do not invent values. Output ONLY the JSON object, no markdown, no commentary, no code fences.`;
     content.push({ type: 'text', text: prompt });
