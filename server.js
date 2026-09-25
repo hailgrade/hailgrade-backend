@@ -4354,7 +4354,7 @@ const LETTER_TEMPLATES=[
     {p:'This email is intended to place [[insurance.company]:blank(20)] on notice that the time period with which to adjust the loss with Smith Adjusters on behalf of [[policyholders.name]:delimit(, ( & ))] has expired as set forth in the policy of insurance and Florida Statute Â§627.70131.'},
     {p:'Please provide a coverage determination by close of business tomorrow or, in the alternative, explain the factors that currently exist that place the insurance company within factors beyond their control that are reasonably preventing a coverage determination.  Please note, it is not appropriate to respond to this correspondence with new, previous unrequested, compliance with policy conditions.'},
     {p:'Thank you,',tight:true},{gap:18},
-    {p:'Alexander James Smith',tight:true},{p:'Public Adjuster - License #W844243',tight:true},{p:'Smith Adjusters',tight:true},{p:'407-927-0134',tight:true}
+    {p:'Alexander James Smith',tight:true},{p:'Public Adjuster - License #W844243',tight:true},{p:'Smith Adjusters',tight:true},{p:'407-755-7682',tight:true}
   ]},
   { id:'lon', name:'Letter of Notification (LON) to Insurer', category:'Letters', esign:false, blocks:[
     {p:'[[today]:format(long)]',tight:true},{gap:10},
@@ -4367,7 +4367,7 @@ const LETTER_TEMPLATES=[
     {p:'Please be advised that Smith Adjusters has been retained by the above-referenced Named Insured for the subject loss. Enclosed you will find a copy of our Letter of Representation. If this claim has not already been notified by the Insured, kindly notify the claim at this time. Smith Adjusters requests that all further communication and correspondence regarding this claim be directed to this office.'},
     {p:'Please provide a certified copy of the subject policy of insurance so that we are prepared to adjust the loss with you and to discuss the applicable coverage with the Named Insured. An electronic copy of the certified policy is accepted and can be provided by email to claims@smithadjusters.com.'},
     {p:'The name "Smith Adjusters" must be included on all drafts, checks, and correspondence pertaining to this loss, and mailed directly to:'},
-    {p:'Smith Adjusters, 498 Palm Springs Dr., Suite 100, Altamonte Springs, FL 32701',tight:true},{gap:6},
+    {p:'Smith Adjusters, 478 E Altamonte Dr, Suite 108-311, Altamonte Springs, FL 32701',tight:true},{gap:6},
     {p:'Kindly contact our assigned adjuster, Alex Smith as soon as possible to discuss this loss or set an appointment to inspect this property. Thank you in advance for your cooperation.'},
     {p:'Sincerely,',tight:true},{gap:14},
     {p:'/s/ Alex Smith',tight:true},{p:'Alexander J. Smith',tight:true},{p:'License #: W844243',tight:true},{p:'Smith Adjusters',tight:true}
@@ -4392,7 +4392,7 @@ async function renderLetterPdf(tpl, data){
   let page=pdf.addPage([W,H]); let y=H-56;
   function header(){ const t1='SMITH ',t2='ADJUSTERS',s=17; const w1=bold.widthOfTextAtSize(t1,s),w2=bold.widthOfTextAtSize(t2,s),cx=(W-(w1+w2))/2;
     page.drawText(t1,{x:cx,y:y,size:s,font:bold,color:DARK}); page.drawText(t2,{x:cx+w1,y:y,size:s,font:bold,color:GREEN}); y-=16;
-    const addr='498 Palm Springs Dr., Suite 100  •  Altamonte Springs, FL 32701  •  407-927-0134  •  claims@smithadjusters.com';
+    const addr='478 E Altamonte Dr, Suite 108-311  •  Altamonte Springs, FL 32701  •  407-755-7682  •  claims@smithadjusters.com';
     const aw=helv.widthOfTextAtSize(addr,8); page.drawText(addr,{x:(W-aw)/2,y:y,size:8,font:helv,color:GREY}); y-=10;
     page.drawLine({start:{x:M,y:y},end:{x:RIGHT,y:y},thickness:1,color:GREEN}); y-=22; }
   function need(h){ if(y-h<70){ page=pdf.addPage([W,H]); pageIdx++; y=H-64; } }
