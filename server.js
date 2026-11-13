@@ -708,6 +708,7 @@ app.post('/org/join', requireAuth, async (req, res) => {
     if (!org) return res.status(404).json({ error: 'org_not_found' });
     await q("UPDATE users SET org_id = $1, org_role = 'member' WHERE id = $2", [org.id, req.user.id]);
     await q('UPDATE org_invites SET used_by = $1, used_at = now() WHERE id = $2', [req.user.id, invite.id]);
+    syncFirmSeats(org.id);
     res.json({ ok: true, org });
   } catch (err) {
     console.error('[org/join]', err);
@@ -726,6 +727,7 @@ app.post('/org/member/:id/deactivate', requireAuth, async (req, res) => {
     const target = await one('SELECT id, org_id FROM users WHERE id = $1', [id]);
     if (!target || target.org_id !== ctx.org.id) return res.status(404).json({ error: 'not_in_org' });
     await q('UPDATE users SET active = false WHERE id = $1', [id]);
+    syncFirmSeats(ctx.org.id);
     res.json({ ok: true });
   } catch (err) {
     console.error('[org/member deactivate]', err);
@@ -743,6 +745,7 @@ app.post('/org/member/:id/reactivate', requireAuth, async (req, res) => {
     const target = await one('SELECT id, org_id FROM users WHERE id = $1', [id]);
     if (!target || target.org_id !== ctx.org.id) return res.status(404).json({ error: 'not_in_org' });
     await q('UPDATE users SET active = true WHERE id = $1', [id]);
+    syncFirmSeats(ctx.org.id);
     res.json({ ok: true });
   } catch (err) {
     console.error('[org/member reactivate]', err);
@@ -777,6 +780,7 @@ app.post('/org/transfer', requireAuth, async (req, res) => {
     if (deactivateSource && fromId !== req.user.id) {
       await q('UPDATE users SET active = false WHERE id = $1', [fromId]);
       moved.source_deactivated = true;
+      syncFirmSeats(ctx.org.id);
     }
     res.json({ ok: true, moved });
   } catch (err) {
@@ -2760,6 +2764,165 @@ app.post('/billing/portal', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[portal]', err);
     res.status(500).json({ error: 'portal_failed', detail: err.message });
+  }
+});
+
+// ============ Ample subscriptions ============
+// Kept apart from the HailGrade checkout above (same users table, different product).
+// One base price per account or firm (AMPLE_PRICE_BASE, $149/mo) plus one "extra adjuster"
+// seat (AMPLE_PRICE_SEAT, $79/mo) for every active employee account in the firm. Yearly prices
+// (AMPLE_PRICE_BASE_YEAR / AMPLE_PRICE_SEAT_YEAR) are optional. Employees are covered by the
+// owner's subscription, and the seat count follows the team automatically (prorated).
+// The app only asks people to subscribe once AMPLE_BILLING_ENFORCE=1 is set. Every account that
+// existed when billing was added is marked billing_exempt (grandfathered).
+const AMPLE_TRIAL_DAYS = Math.max(0, parseInt(process.env.AMPLE_TRIAL_DAYS || '14', 10) || 0);
+function _amplePrices(interval) {
+  const yr = interval === 'year';
+  return {
+    base: (yr ? process.env.AMPLE_PRICE_BASE_YEAR : process.env.AMPLE_PRICE_BASE) || '',
+    seat: (yr ? process.env.AMPLE_PRICE_SEAT_YEAR : process.env.AMPLE_PRICE_SEAT) || ''
+  };
+}
+function _isAmpleSeatPrice(id) { return !!id && (id === process.env.AMPLE_PRICE_SEAT || id === process.env.AMPLE_PRICE_SEAT_YEAR); }
+function _isAmplePrice(id) { return !!id && (_isAmpleSeatPrice(id) || id === process.env.AMPLE_PRICE_BASE || id === process.env.AMPLE_PRICE_BASE_YEAR); }
+function _billingReturnBase(req) {
+  const o = req.headers.origin;
+  if (o && ALLOWED_ORIGINS.includes(o)) return o;
+  return 'https://ampleclaim.com';
+}
+async function _extraSeatCount(orgId) {
+  if (!orgId) return 0;
+  const r = await one("SELECT COUNT(*)::int AS n FROM users WHERE org_id = $1 AND org_role = 'member' AND active IS NOT FALSE", [orgId]);
+  return (r && r.n) || 0;
+}
+async function _orgOwner(orgId) {
+  if (!orgId) return null;
+  return await one('SELECT u.* FROM orgs g JOIN users u ON u.id = g.owner_user_id WHERE g.id = $1', [orgId]);
+}
+// Who pays for this user: the firm owner for an employee, otherwise the user.
+async function _billingPayer(user) {
+  if (user.org_id && user.org_role === 'member') {
+    const o = await _orgOwner(user.org_id);
+    if (o) return o;
+  }
+  return user;
+}
+function _amplePaid(u) { return !!u && u.plan === 'ample' && (u.plan_status === 'active' || u.plan_status === 'trialing'); }
+
+// Keep the firm's seat line on Stripe equal to its active employee accounts.
+async function syncFirmSeats(orgId) {
+  try {
+    if (!orgId || !process.env.STRIPE_SECRET_KEY) return;
+    const owner = await _orgOwner(orgId);
+    if (!owner || !owner.ample_subscription_id) return;
+    const sub = await stripe.subscriptions.retrieve(owner.ample_subscription_id);
+    if (!sub || sub.status === 'canceled' || sub.status === 'incomplete_expired') return;
+    const n = await _extraSeatCount(orgId);
+    const items = (sub.items && sub.items.data) || [];
+    const seatItem = items.find(i => _isAmpleSeatPrice(i.price && i.price.id));
+    const baseItem = items.find(i => !_isAmpleSeatPrice(i.price && i.price.id));
+    const yearly = !!(baseItem && baseItem.price && baseItem.price.recurring && baseItem.price.recurring.interval === 'year');
+    const seatPrice = _amplePrices(yearly ? 'year' : 'month').seat;
+    if (seatItem) {
+      if (n === 0) await stripe.subscriptionItems.del(seatItem.id, { proration_behavior: 'create_prorations' });
+      else if (seatItem.quantity !== n) await stripe.subscriptionItems.update(seatItem.id, { quantity: n, proration_behavior: 'create_prorations' });
+    } else if (n > 0 && seatPrice) {
+      await stripe.subscriptionItems.create({ subscription: sub.id, price: seatPrice, quantity: n, proration_behavior: 'create_prorations' });
+    }
+    await q('UPDATE users SET plan_seats = $1 WHERE id = $2', [n, owner.id]);
+  } catch (e) { console.error('[billing] seat sync', e.message); }
+}
+
+// GET /billing/ample/status - what the app needs to show the billing screen or the paywall.
+app.get('/billing/ample/status', requireAuth, async (req, res) => {
+  try {
+    const payer = await _billingPayer(req.user);
+    const covered = payer.id !== req.user.id;
+    const seats = await _extraSeatCount(req.user.org_id);
+    const exempt = !!payer.billing_exempt || payer.role === 'admin';
+    const paid = _amplePaid(payer);
+    const enforce = process.env.AMPLE_BILLING_ENFORCE === '1';
+    const p = _amplePrices('month'), py = _amplePrices('year');
+    res.json({
+      configured: !!(process.env.STRIPE_SECRET_KEY && p.base),
+      yearly_available: !!py.base,
+      enforce,
+      status: payer.plan === 'ample' ? (payer.plan_status || null) : null,
+      paid, exempt,
+      covered_by_firm: covered,
+      firm_owner_name: covered ? (payer.full_name || payer.email) : null,
+      is_payer: !covered,
+      extra_adjusters: seats,
+      renews_at: payer.plan === 'ample' ? payer.plan_renews_at : null,
+      interval: payer.ample_interval || null,
+      trial_available: !payer.ample_trial_used && AMPLE_TRIAL_DAYS > 0,
+      trial_days: AMPLE_TRIAL_DAYS,
+      has_customer: !!payer.stripe_customer_id,
+      needs_subscription: enforce && !exempt && !paid
+    });
+  } catch (err) {
+    console.error('[billing/ample/status]', err);
+    res.status(500).json({ error: 'status_failed' });
+  }
+});
+
+// POST /billing/ample/checkout { interval: 'month' | 'year' } - owner or solo adjuster only.
+app.post('/billing/ample/checkout', requireAuth, async (req, res) => {
+  try {
+    if (req.user.org_id && req.user.org_role === 'member') {
+      return res.status(403).json({ error: 'owner_pays', message: 'Your firm owner manages the subscription.' });
+    }
+    const interval = (req.body && req.body.interval) === 'year' ? 'year' : 'month';
+    const prices = _amplePrices(interval);
+    if (!process.env.STRIPE_SECRET_KEY || !prices.base) return res.status(503).json({ error: 'billing_not_configured', message: 'Payments are not set up yet.' });
+    if (_amplePaid(req.user)) return res.status(409).json({ error: 'already_subscribed', message: 'You already have a subscription. Use Manage billing to change it.' });
+    let customerId = req.user.stripe_customer_id;
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: req.user.email,
+        name: req.user.firm_name || req.user.full_name || undefined,
+        metadata: { user_id: String(req.user.id) }
+      });
+      customerId = customer.id;
+      await q('UPDATE users SET stripe_customer_id = $1 WHERE id = $2', [customerId, req.user.id]);
+    }
+    const seats = await _extraSeatCount(req.user.org_id);
+    const line_items = [{ price: prices.base, quantity: 1 }];
+    if (seats > 0 && prices.seat) line_items.push({ price: prices.seat, quantity: seats });
+    const subscription_data = { metadata: { user_id: String(req.user.id), product: 'ample' } };
+    if (!req.user.ample_trial_used && AMPLE_TRIAL_DAYS > 0) subscription_data.trial_period_days = AMPLE_TRIAL_DAYS;
+    const base = _billingReturnBase(req);
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      mode: 'subscription',
+      line_items,
+      subscription_data,
+      payment_method_collection: 'always',
+      allow_promotion_codes: true,
+      client_reference_id: String(req.user.id),
+      success_url: base + '/?billing=success',
+      cancel_url: base + '/?billing=canceled'
+    });
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error('[billing/ample/checkout]', err);
+    res.status(500).json({ error: 'checkout_failed', message: 'Could not open checkout. Try again in a minute.' });
+  }
+});
+
+// POST /billing/ample/portal - Stripe's page to change card, plan, see invoices or cancel.
+app.post('/billing/ample/portal', requireAuth, async (req, res) => {
+  try {
+    if (req.user.org_id && req.user.org_role === 'member') return res.status(403).json({ error: 'owner_pays', message: 'Your firm owner manages the subscription.' });
+    if (!req.user.stripe_customer_id) return res.status(400).json({ error: 'no_customer', message: 'There is no subscription yet.' });
+    const session = await stripe.billingPortal.sessions.create({
+      customer: req.user.stripe_customer_id,
+      return_url: _billingReturnBase(req) + '/?billing=portal'
+    });
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error('[billing/ample/portal]', err);
+    res.status(500).json({ error: 'portal_failed', message: 'Could not open billing. Try again in a minute.' });
   }
 });
 
@@ -4844,6 +5007,26 @@ async function handleStripeWebhook(req, res) {
           ? await stripe.subscriptions.retrieve(event.data.object.subscription)
           : event.data.object;
         const customerId = sub.customer;
+        const subItems = (sub.items && sub.items.data) || [];
+        if (subItems.some(i => _isAmplePrice(i.price && i.price.id))) {
+          // Ample subscription: base + optional extra-adjuster seats.
+          const seatIt = subItems.find(i => _isAmpleSeatPrice(i.price && i.price.id));
+          const baseIt = subItems.find(i => !_isAmpleSeatPrice(i.price && i.price.id)) || subItems[0];
+          const periodEnd = sub.current_period_end || (baseIt && baseIt.current_period_end) || null;
+          const interval = (baseIt && baseIt.price && baseIt.price.recurring && baseIt.price.recurring.interval) || 'month';
+          await q(
+            `UPDATE users SET plan = 'ample', plan_status = $1, plan_renews_at = to_timestamp($2),
+                    ample_subscription_id = $3, ample_interval = $4, plan_seats = $5, ample_trial_used = true
+             WHERE stripe_customer_id = $6`,
+            [sub.status, periodEnd, sub.id, interval, seatIt ? seatIt.quantity : 0, customerId]
+          );
+          // Seats may have changed while checkout was open.
+          try {
+            const own = await one('SELECT org_id, org_role FROM users WHERE stripe_customer_id = $1', [customerId]);
+            if (own && own.org_id && own.org_role === 'owner') await syncFirmSeats(own.org_id);
+          } catch (e) {}
+          break;
+        }
         const plan = sub.items.data[0]?.price?.id === process.env.STRIPE_PRICE_FIRM ? 'firm' : 'solo';
         await q(
           `UPDATE users SET plan = $1, plan_status = $2, plan_renews_at = to_timestamp($3)
@@ -5178,6 +5361,17 @@ async function boot() {
     try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS org_role TEXT"); } catch (e) {}
     try { await q("ALTER TABLE users ADD COLUMN IF NOT NULL DEFAULT true"); } catch (e) {}
     try { await q("ALTER TABLE org_invites ADD COLUMN IF NOT EXISTS email TEXT"); } catch (e) {}
+    // Ample subscriptions. billing_exempt is added without a default first so every account that
+    // exists today is grandfathered (set true once); accounts created afterwards default to false.
+    try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS ample_subscription_id TEXT"); } catch (e) {}
+    try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS ample_interval TEXT"); } catch (e) {}
+    try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_seats INTEGER"); } catch (e) {}
+    try { await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS ample_trial_used BOOLEAN NOT NULL DEFAULT false"); } catch (e) {}
+    try {
+      await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS billing_exempt BOOLEAN");
+      await q("UPDATE users SET billing_exempt = true WHERE billing_exempt IS NULL");
+      await q("ALTER TABLE users ALTER COLUMN billing_exempt SET DEFAULT false");
+    } catch (e) { console.error('[boot] billing columns', e.message); }
     try { await q("CREATE TABLE IF NOT EXISTS events (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, org_id INTEGER, claim_local_id TEXT, title TEXT NOT NULL, description TEXT, starts_at TIMESTAMPTZ NOT NULL, ends_at TIMESTAMPTZ, all_day BOOLEAN NOT NULL DEFAULT false, location TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"); } catch (e) { console.error('[boot] events table', e.message); }
     try { await q("CREATE INDEX IF NOT EXISTS events_user_idx ON events (user_id, starts_at)"); } catch (e) {}
     try { await q("CREATE INDEX IF NOT EXISTS events_org_idx ON events (org_id, starts_at)"); } catch (e) {}
