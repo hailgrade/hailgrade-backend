@@ -44,11 +44,45 @@ app.use(cors({
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
     if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    // Allow any *.netlify.app subdomain in case of preview deploys
-    if (/\.netlify\.app$/.test(new URL(origin).hostname)) return cb(null, true);
+    // Only the sites above. Accepting ANY *.netlify.app address let anyone's Netlify page call
+    // this API from a browser. Add a preview address to ALLOWED_ORIGINS when one is needed.
     cb(new Error('CORS not allowed for ' + origin));
   }
 }));
+
+// Basic security headers on every response.
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
+
+/* Brute-force protection for sign-in and sign-up. In memory (one server instance): after too
+   many failed sign-ins for one email - or from one IP - further attempts are refused for a
+   while, so a password cannot be guessed by trying thousands of times. */
+const _authAttempts = new Map();   // key -> { n, first, lockedUntil }
+function _authKey(kind, v) { return kind + ':' + String(v || '').toLowerCase(); }
+function _clientIp(req) { return String((req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || ''); }
+function _authBlocked(keys) {
+  const now = Date.now();
+  for (const k of keys) { const a = _authAttempts.get(k); if (a && a.lockedUntil > now) return Math.ceil((a.lockedUntil - now) / 60000); }
+  return 0;
+}
+function _authFail(keys, max, windowMs, lockMs) {
+  const now = Date.now();
+  for (const k of keys) {
+    let a = _authAttempts.get(k);
+    if (!a || now - a.first > windowMs) a = { n: 0, first: now, lockedUntil: 0 };
+    a.n++;
+    if (a.n >= max) { a.lockedUntil = now + lockMs; a.n = 0; a.first = now; }
+    _authAttempts.set(k, a);
+  }
+}
+function _authOk(keys) { for (const k of keys) _authAttempts.delete(k); }
+setInterval(() => { const now = Date.now(); for (const [k, a] of _authAttempts) { if (a.lockedUntil < now && now - a.first > 3600000) _authAttempts.delete(k); } }, 600000).unref();
 
 // Stripe webhook needs the raw body, so register it BEFORE express.json()
 app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), handleStripeWebhook);
@@ -73,7 +107,12 @@ app.post('/auth/signup', async (req, res) => {
   try {
     const { email, password, full_name, license_number, firm_name, role } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: 'email_and_password_required' });
-    if (password.length < 8) return res.status(400).json({ error: 'password_too_short', message: 'Password must be at least 8 characters.' });
+    // Sign-up flood protection: 10 new accounts per IP per hour.
+    const _sk = _authKey('signup-ip', _clientIp(req));
+    if (_authBlocked([_sk])) return res.status(429).json({ error: 'too_many_signups', message: 'Too many accounts created from this connection. Try again later.' });
+    _authFail([_sk], 10, 3600000, 3600000);
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(email).trim())) return res.status(400).json({ error: 'bad_email', message: 'Enter a valid email address.' });
+    if (String(password).length < 10) return res.status(400).json({ error: 'password_too_short', message: 'Use at least 10 characters for your password.' });
     const safeRole = (String(role || '').toLowerCase() === 'roofer') ? 'roofer' : 'user';
     const lower = email.trim().toLowerCase();
     const existing = await one('SELECT id FROM users WHERE lower(email) = $1', [lower]);
@@ -98,10 +137,15 @@ app.post('/auth/login', async (req, res) => {
     const { email, password } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: 'email_and_password_required' });
     const lower = email.trim().toLowerCase();
+    // 8 wrong passwords for one email (or 30 from one IP) within 15 minutes locks sign-in for 15 minutes.
+    const _ek = _authKey('login-email', lower), _ik = _authKey('login-ip', _clientIp(req));
+    const _wait = _authBlocked([_ek, _ik]);
+    if (_wait) return res.status(429).json({ error: 'too_many_attempts', message: 'Too many sign-in attempts. Try again in ' + _wait + ' minute' + (_wait === 1 ? '' : 's') + ', or reset your password.' });
     const user = await one('SELECT * FROM users WHERE lower(email) = $1', [lower]);
-    if (!user) return res.status(401).json({ error: 'invalid_credentials' });
+    if (!user) { _authFail([_ek], 8, 900000, 900000); _authFail([_ik], 30, 900000, 900000); return res.status(401).json({ error: 'invalid_credentials' }); }
     const ok = await checkPassword(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: 'invalid_credentials' });
+    if (!ok) { _authFail([_ek], 8, 900000, 900000); _authFail([_ik], 30, 900000, 900000); return res.status(401).json({ error: 'invalid_credentials' }); }
+    _authOk([_ek]);
     // Stamp the sign-in so the admin dashboard can show real usage.
     try { await q('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]); } catch (e) {}
     const token = signToken(user);
@@ -117,7 +161,7 @@ app.post('/auth/login', async (req, res) => {
 
 // Founder emails â auto-promoted to admin on any authenticated request.
 // Add additional admin emails here if you bring on a co-founder or support staff.
-const ADMIN_EMAILS = new Set(['adjustingsmith@gmail.com', 'claims@smithadjusters.com']);
+// (ADMIN_EMAILS removed: admin is granted only by the users.role column - see GET /me.)
 
 // POST /auth/change-password — rotate this account's password.
 // Verifies the CURRENT password first, then stamps password_changed_at, which invalidates
@@ -207,11 +251,10 @@ app.post('/claim/ask', requireAuth, async (req, res) => {
 
 app.get('/me', requireAuth, async (req, res) => {
   const u = req.user;
-  // Auto-promote founder emails to admin so they don't need a SQL session to bootstrap
-  if (ADMIN_EMAILS.has((u.email || '').toLowerCase()) && u.role !== 'admin') {
-    await q("UPDATE users SET role = 'admin' WHERE id = $1", [u.id]);
-    u.role = 'admin';
-  }
+  /* Founder emails used to be promoted to admin here automatically. Sign-up does not verify
+     that you own the email address, so anyone could register a founder address that had no
+     account yet and be made an admin of every customer's data. Admin now comes only from the
+     database role (existing admins keep it); grant new admins with SQL. */
   res.json({
     user: {
       id: u.id, email: u.email, full_name: u.full_name, license_number: u.license_number,
@@ -468,6 +511,77 @@ function makeInviteCode() {
   return 'HG-' + s;
 }
 
+/* ===== Firm claims: the master account sees, reports on and assigns every adjuster's claims =====
+   Claims are stored per adjuster (pa_claims.pa_user_id). Assigning a claim MOVES its row to the
+   other adjuster and leaves a small marker row ({_movedTo}) for the previous one, so that
+   person's devices remove it instead of pushing it back. */
+async function _moveOneClaim(fromId, toId, localId) {
+  await _ensureClaimsTable();
+  const row = await one('SELECT data, updated_at FROM pa_claims WHERE pa_user_id = $1 AND claim_local_id = $2', [fromId, localId]);
+  if (!row || !row.data || row.data._movedTo) return false;
+  const now = Date.now();
+  const data = Object.assign({}, row.data, { lastTouched: now, assignedAt: now });
+  await pool.query(
+    'INSERT INTO pa_claims (pa_user_id, claim_local_id, data, updated_at, server_updated_at) VALUES ($1, $2, $3, $4, now()) ON CONFLICT (pa_user_id, claim_local_id) DO UPDATE SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at, server_updated_at = now()',
+    [toId, localId, JSON.stringify(data), now]
+  );
+  await pool.query(
+    'UPDATE pa_claims SET data = $3, updated_at = $4, server_updated_at = now() WHERE pa_user_id = $1 AND claim_local_id = $2',
+    [fromId, localId, JSON.stringify({ id: localId, _movedTo: toId, _movedAt: now }), now]
+  );
+  return true;
+}
+async function _moveAllClaims(fromId, toId) {
+  await _ensureClaimsTable();
+  const rows = await q("SELECT claim_local_id FROM pa_claims WHERE pa_user_id = $1 AND NOT (data ? '_movedTo')", [fromId]);
+  let n = 0;
+  for (const r of rows) { if (await _moveOneClaim(fromId, toId, r.claim_local_id)) n++; }
+  return n;
+}
+// GET /org/claims - owner only. Every member's claims (without file contents), with who has each.
+app.get('/org/claims', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadOrgContext(req.user.id);
+    if (!ctx.org || ctx.role !== 'owner') return res.status(403).json({ error: 'owner_only' });
+    await _ensureClaimsTable();
+    const rows = await q(
+      `SELECT c.pa_user_id, c.claim_local_id, c.updated_at,
+              (c.data - 'attachments' - 'photos' - '_emailCache' - '_partnerFiles' - 'paperContract' - 'dopDoc') AS data,
+              u.full_name, u.email, u.active
+         FROM pa_claims c JOIN users u ON u.id = c.pa_user_id
+        WHERE u.org_id = $1 AND NOT (c.data ? '_movedTo')
+        ORDER BY c.updated_at DESC`,
+      [ctx.org.id]
+    );
+    res.json({ claims: rows.map(r => ({ id: r.claim_local_id, owner_id: r.pa_user_id, owner_name: r.full_name || r.email, owner_active: r.active !== false, updated_at: Number(r.updated_at) || 0, data: r.data })) });
+  } catch (err) {
+    console.error('[org/claims GET]', err);
+    res.status(500).json({ error: 'org_claims_failed', detail: err.message });
+  }
+});
+// POST /org/claims/assign - owner only. Body { from_user_id, claim_local_id, to_user_id }.
+app.post('/org/claims/assign', requireAuth, async (req, res) => {
+  try {
+    const ctx = await loadOrgContext(req.user.id);
+    if (!ctx.org || ctx.role !== 'owner') return res.status(403).json({ error: 'owner_only' });
+    const fromId = parseInt(req.body && req.body.from_user_id), toId = parseInt(req.body && req.body.to_user_id);
+    const localId = String((req.body && req.body.claim_local_id) || '').slice(0, 200);
+    if (!fromId || !toId || !localId) return res.status(400).json({ error: 'from_to_claim_required' });
+    if (fromId === toId) return res.json({ ok: true, unchanged: true });
+    const from = await one('SELECT id, org_id FROM users WHERE id = $1', [fromId]);
+    const to = await one('SELECT id, org_id, active FROM users WHERE id = $1', [toId]);
+    if (!from || from.org_id !== ctx.org.id) return res.status(404).json({ error: 'from_not_in_org' });
+    if (!to || to.org_id !== ctx.org.id) return res.status(404).json({ error: 'to_not_in_org' });
+    if (to.active === false) return res.status(400).json({ error: 'to_inactive', message: 'That adjuster account is deactivated.' });
+    const ok = await _moveOneClaim(fromId, toId, localId);
+    if (!ok) return res.status(404).json({ error: 'claim_not_found' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[org/claims/assign]', err);
+    res.status(500).json({ error: 'assign_failed', detail: err.message });
+  }
+});
+
 async function loadOrgContext(userId) {
   const u = await one('SELECT id, org_id, org_role FROM users WHERE id = $1', [userId]);
   if (!u || !u.org_id) return { org: null, role: null };
@@ -657,6 +771,9 @@ app.post('/org/transfer', requireAuth, async (req, res) => {
         moved[table] = rows.length;
       } catch (e) { moved[table] = 'skipped'; }
     }
+    // The claims themselves (pa_claims) were never moved, so a departing adjuster's files stayed
+    // behind. Move each one, leaving a "moved" marker so the old account's devices drop it.
+    try { moved.claims = await _moveAllClaims(fromId, toId); } catch (e) { moved.claims = 'skipped'; }
     if (deactivateSource && fromId !== req.user.id) {
       await q('UPDATE users SET active = false WHERE id = $1', [fromId]);
       moved.source_deactivated = true;
@@ -2447,6 +2564,12 @@ app.put('/claims/:localId', requireAuth, async (req, res) => {
     const data = b.data;
     const updatedAt = Number(b.updated_at) || Date.now();
     if (data == null || typeof data !== 'object') return res.status(400).json({ error: 'no_data' });
+    // A claim reassigned to another adjuster leaves a "moved" marker here; never let this
+    // account's devices write it back. Answer ok so the device stops retrying.
+    try {
+      const cur = await one("SELECT (data ? '_movedTo') AS moved FROM pa_claims WHERE pa_user_id = $1 AND claim_local_id = $2", [req.user.id, localId]);
+      if (cur && cur.moved) return res.json({ ok: true, moved: true });
+    } catch (e) {}
     await pool.query(
       'INSERT INTO pa_claims (pa_user_id, claim_local_id, data, updated_at, server_updated_at) VALUES ($1, $2, $3, $4, now()) ON CONFLICT (pa_user_id, claim_local_id) DO UPDATE SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at, server_updated_at = now() WHERE EXCLUDED.updated_at >= pa_claims.updated_at',
       [req.user.id, localId, JSON.stringify(data), updatedAt]
